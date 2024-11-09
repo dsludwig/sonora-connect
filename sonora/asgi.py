@@ -94,6 +94,7 @@ class grpcASGI(grpc.Server):
         headers = context._response_headers
         wrap_message = context._wrap_message
         unwrap_message = context._unwrap_message
+        make_deserializer = context._make_deserializer
 
         if not rpc_method.request_streaming and not rpc_method.response_streaming:
             method = rpc_method.unary_unary
@@ -106,8 +107,9 @@ class grpcASGI(grpc.Server):
         else:
             raise NotImplementedError
 
+        deserializer = make_deserializer(rpc_method.request_deserializer)
         request_proto_iterator = (
-            rpc_method.request_deserializer(bytes(message))
+            deserializer(bytes(message))
             async for _, _, message in unwrap_message(receive)
         )
 
@@ -194,6 +196,7 @@ class grpcASGI(grpc.Server):
     async def _do_unary_response(
         self, rpc_method, receive, send, wrap_message, context, coroutine
     ):
+        make_serializer = context._make_serializer
         headers = context._response_headers
 
         if coroutine is None:
@@ -206,10 +209,9 @@ class grpcASGI(grpc.Server):
         if context._initial_metadata:
             headers.extend(context._initial_metadata)
 
+        serializer = make_serializer(rpc_method.response_serializer)
         if message is not None:
-            message_data = wrap_message(
-                False, False, rpc_method.response_serializer(message)
-            )
+            message_data = wrap_message(False, False, serializer(message))
         else:
             message_data = b""
 
@@ -330,6 +332,8 @@ class ServicerContext(grpc.ServicerContext):
 
         self._wrap_message = protocol.wrap_message
         self._unwrap_message = protocol.unwrap_message_asgi
+        self._make_serializer = lambda i: i
+        self._make_deserializer = lambda i: i
         origin = None
 
         for header, value in metadata:
@@ -337,10 +341,13 @@ class ServicerContext(grpc.ServicerContext):
                 if value == "application/grpc-web-text":
                     self._wrap_message = protocol.b64_wrap_message
                     self._unwrap_message = protocol.b64_unwrap_message_asgi
+                elif value == "application/grpc-web+json":
+                    self._make_serializer = protocol.serialize_json
+                    self._make_deserializer = protocol.deserialize_json
+                    response_content_type = "application/grpc-web+json"
                 elif value not in (
                     "application/grpc-web",
                     "application/grpc-web+proto",
-                    "application/grpc-web+json",
                 ):
                     self.code = grpc.StatusCode.UNKNOWN
                     self.details = "Unsupported content-type"

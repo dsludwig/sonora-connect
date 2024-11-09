@@ -4,6 +4,7 @@ import struct
 from urllib.parse import unquote
 
 import grpc
+from google.protobuf import json_format
 
 _HEADER_FORMAT = ">BI"
 _HEADER_LENGTH = struct.calcsize(_HEADER_FORMAT)
@@ -154,6 +155,23 @@ def encode_headers(metadata):
             header = header.decode("ascii")
 
         yield header, value
+
+
+def deserialize_json(request_deserializer):
+    klass = request_deserializer.__self__
+
+    def deserializer(buffer):
+        message = klass()
+        return json_format.Parse(buffer, message)
+
+    return deserializer
+
+
+def serialize_json(response_serializer):
+    def serializer(message):
+        return json_format.MessageToJson(message).encode()
+
+    return serializer
 
 
 class WebRpcError(grpc.RpcError):
