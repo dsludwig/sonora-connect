@@ -9,6 +9,7 @@ homepage = "https://github.com/public/sonora"
 [tool.poetry.dependencies]
 python = "^3.7"
 grpcio = "^1.57.0"
+grpcio-status = "^1.57.0"
 urllib3 = "^1.26.4"
 aiohttp = "^3.7.4"
 async-timeout = ">= 3.0.1, < 5"
