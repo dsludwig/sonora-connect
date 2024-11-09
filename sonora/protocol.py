@@ -5,7 +5,6 @@ from urllib.parse import unquote
 
 import grpc
 
-
 _HEADER_FORMAT = ">BI"
 _HEADER_LENGTH = struct.calcsize(_HEADER_FORMAT)
 
@@ -124,10 +123,10 @@ def pack_trailers(trailers):
     data = bytearray()
     for k, v in trailers:
         k = k.lower()
-        data.extend(k.encode('utf8'))
-        data.extend(b': ')
-        data.extend(v.encode('utf8'))
-        data.extend(b'\r\n')
+        data.extend(k.encode("utf8"))
+        data.extend(b": ")
+        data.extend(v.encode("utf8"))
+        data.extend(b"\r\n")
     return bytes(data)
 
 
@@ -147,7 +146,9 @@ def encode_headers(metadata):
             if not header.endswith("-bin"):
                 raise ValueError("binary headers must have the '-bin' suffix")
 
-            value = base64.b64encode(value).decode("ascii")
+            # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+            # Implementations should emit unpadded values
+            value = base64.b64encode(value).decode("ascii").rstrip("=")
 
         if isinstance(header, bytes):
             header = header.decode("ascii")

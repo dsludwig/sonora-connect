@@ -45,10 +45,10 @@ def headers_from_metadata(
 def create_rich_error(
     error: service_pb2.Error, request_info: service_pb2.ConformancePayload.RequestInfo
 ) -> grpc.Status:
-    details = list(error.details)
     detail = Any()
     detail.Pack(request_info)
-    details.append(details)
+    details = error.details
+    details.append(detail)
 
     status = status_pb2.Status(
         code=error.code,

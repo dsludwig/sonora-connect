@@ -1,12 +1,12 @@
 import asyncio
 import base64
+import time
 from collections import namedtuple
 from collections.abc import AsyncIterator
-import time
 from urllib.parse import quote
 
-from async_timeout import timeout
 import grpc
+from async_timeout import timeout
 
 from sonora import protocol
 
@@ -36,6 +36,8 @@ class grpcASGI(grpc.Server):
         if rpc_method:
             if request_method == "POST":
                 context = self._create_context(scope)
+                if context.code != grpc.StatusCode.OK:
+                    return await self._do_grpc_error(send, context)
 
                 try:
                     async with timeout(context.time_remaining()):
@@ -113,9 +115,9 @@ class grpcASGI(grpc.Server):
             if rpc_method.request_streaming:
                 coroutine = method(request_proto_iterator, context)
             else:
-                request_proto = await anext(
-                    request_proto_iterator, None
-                ) or rpc_method.request_deserializer(b"")
+                request_proto = await anext(request_proto_iterator, None)
+                if request_proto is None:
+                    raise NotImplementedError()
                 coroutine = method(request_proto, context)
         except NotImplementedError:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -214,9 +216,7 @@ class grpcASGI(grpc.Server):
         trailers = [("grpc-status", str(context.code.value[0]))]
 
         if context.details:
-            trailers.append(
-                ("grpc-message", quote(context.details))
-            )
+            trailers.append(("grpc-message", quote(context.details)))
 
         if context._trailing_metadata:
             trailers.extend(context._trailing_metadata)
@@ -245,9 +245,25 @@ class grpcASGI(grpc.Server):
         headers = context._response_headers
         headers.append((b"grpc-status", str(context.code.value[0]).encode()))
 
+        # If Content-Type does not begin with "application/grpc", gRPC servers
+        # SHOULD respond with HTTP status of 415 (Unsupported Media Type). This
+        # will prevent other HTTP/2 clients from interpreting a gRPC error
+        # response, which uses status 200 (OK), as successful.
+        if context.code == grpc.StatusCode.UNKNOWN:
+            status = 415
+
         if context.details:
             headers.append(
                 (b"grpc-message", quote(context.details.encode("utf8")).encode("ascii"))
+            )
+
+        if context._initial_metadata:
+            headers.extend(context._initial_metadata)
+
+        if context._trailing_metadata:
+            headers.extend(
+                (name.encode("ascii"), value.encode("utf-8"))
+                for name, value in context._trailing_metadata
             )
 
         await send(
@@ -321,10 +337,21 @@ class ServicerContext(grpc.ServicerContext):
                 if value == "application/grpc-web-text":
                     self._wrap_message = protocol.b64_wrap_message
                     self._unwrap_message = protocol.b64_unwrap_message_asgi
+                elif value not in (
+                    "application/grpc-web",
+                    "application/grpc-web+proto",
+                    "application/grpc-web+json",
+                ):
+                    self.code = grpc.StatusCode.UNKNOWN
+                    self.details = "Unsupported content-type"
             elif header == "accept":
                 response_content_type = value.split(",")[0].strip()
             elif header == "host":
                 origin = value
+            elif header == "grpc-encoding":
+                if value.lower() != "identity":
+                    self.code = grpc.StatusCode.UNIMPLEMENTED
+                    self.details = "Unsupported encoding"
 
         if not origin:
             raise ValueError("Request is missing the host header")
@@ -367,11 +394,19 @@ class ServicerContext(grpc.ServicerContext):
 
         raise grpc.RpcError()
 
-    async def abort_with_status(self, status):
-        if status == grpc.StatusCode.OK:
-            raise ValueError()
+    async def abort_with_status(self, status: grpc.Status):
+        if status.code == grpc.StatusCode.OK:
+            self.set_code(grpc.StatusCode.UNKNOWN)
+            raise grpc.RpcError()
 
-        self.set_code(status)
+        self.set_code(status.code)
+        self.set_details(status.details)
+        if self._trailing_metadata is None:
+            self.set_trailing_metadata(status.trailing_metadata)
+        else:
+            self.set_trailing_metadata(
+                tuple(self._trailing_metadata) + tuple(status.trailing_metadata)
+            )
 
         raise grpc.RpcError()
 
