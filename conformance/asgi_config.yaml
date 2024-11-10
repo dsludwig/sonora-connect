@@ -1,6 +1,7 @@
 features:
   versions:
     - HTTP_VERSION_1
+    - HTTP_VERSION_2
   protocols:
     - PROTOCOL_GRPC_WEB
   codecs:
@@ -12,7 +13,7 @@ features:
     - STREAM_TYPE_UNARY
 
   supports_trailers: false
-  supports_tls: false
+  supports_tls: true
   supports_tls_client_certs: false
   supports_h2c: false
   supports_connect_get: false
