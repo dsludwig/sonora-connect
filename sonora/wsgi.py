@@ -1,12 +1,11 @@
 import base64
-from collections import namedtuple
 import time
+from collections import namedtuple
 from urllib.parse import quote
 
 import grpc
 
 from sonora import protocol
-
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")
@@ -77,28 +76,50 @@ class grpcWSGI(grpc.Server):
 
         context = self._create_context(environ)
 
-        if environ["CONTENT_TYPE"] == "application/grpc-web-text":
-            _, _, message = protocol.b64_unwrap_message(request_data)
+        unwrap_message = protocol.unwrap_message
+        content_type = environ["CONTENT_TYPE"]
+        if content_type == "application/grpc-web-text":
+            unwrap_message = protocol.b64_unwrap_message
+        elif content_type in (
+            "application/grpc-web",
+            "application/grpc-web+proto",
+            "application/grpc-web+json",
+        ):
+            unwrap_message = protocol.unwrap_message
         else:
-            _, _, message = protocol.unwrap_message(request_data)
+            message = b""
+            context.set_code(grpc.StatusCode.UNKNOWN)
 
-        request_proto = rpc_method.request_deserializer(message)
-
+        request_proto = None
         resp = None
 
-        try:
-            if not rpc_method.request_streaming and not rpc_method.response_streaming:
-                resp = rpc_method.unary_unary(request_proto, context)
-            elif not rpc_method.request_streaming and rpc_method.response_streaming:
-                resp = rpc_method.unary_stream(request_proto, context)
-                if context.time_remaining() is not None:
-                    resp = _timeout_generator(context, resp)
-            else:
-                raise NotImplementedError()
-        except grpc.RpcError:
-            pass
-        except NotImplementedError:
+        if environ.get("HTTP_GRPC_ENCODING", "identity") != "identity":
+            message = b"Unsupported encoding"
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        else:
+            try:
+                _, _, message = unwrap_message(request_data)
+                request_proto = rpc_method.request_deserializer(message)
+            except ValueError:
+                pass
+
+        if request_proto:
+            try:
+                if (
+                    not rpc_method.request_streaming
+                    and not rpc_method.response_streaming
+                ):
+                    resp = rpc_method.unary_unary(request_proto, context)
+                elif not rpc_method.request_streaming and rpc_method.response_streaming:
+                    resp = rpc_method.unary_stream(request_proto, context)
+                    if context.time_remaining() is not None:
+                        resp = _timeout_generator(context, resp)
+                else:
+                    raise NotImplementedError()
+            except grpc.RpcError:
+                pass
+            except NotImplementedError:
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
 
         response_content_type = (
             environ.get("HTTP_ACCEPT", "application/grpc-web+proto")
@@ -199,7 +220,10 @@ class grpcWSGI(grpc.Server):
 
         headers.append(("content-length", str(content_length)))
 
-        start_response("200 OK", headers)
+        if context.code == grpc.StatusCode.UNKNOWN:
+            start_response("415 Unsupported Media Type", headers)
+        else:
+            start_response("200 OK", headers)
 
         yield message_data
 
@@ -261,31 +285,9 @@ class grpcWSGI(grpc.Server):
 
         stream = environ["wsgi.input"]
 
-        transfer_encoding = environ.get("HTTP_TRANSFER_ENCODING")
-
-        if transfer_encoding == "chunked":
-            buffer = []
-            line = stream.readline()
-
-            while line:
-                if not line:
-                    break
-
-                size = line.split(b";", 1)[0]
-
-                if size == "\r\n":
-                    break
-
-                chunk_size = int(size, 16)
-
-                if chunk_size == 0:
-                    break
-
-                buffer.append(stream.read(chunk_size + 2)[:-2])
-                line = stream.readline()
-            return b"".join(buffer)
-        else:
-            return stream.read(content_length or 5)
+        # Transfer encoding=chunked should be handled by the WSGI server
+        # (Hop-by-hop header).
+        return stream.read(content_length)
 
 
 class ServicerContext(grpc.ServicerContext):
@@ -333,10 +335,18 @@ class ServicerContext(grpc.ServicerContext):
         raise grpc.RpcError()
 
     def abort_with_status(self, status):
-        if status == grpc.StatusCode.OK:
-            raise ValueError()
+        if status.code == grpc.StatusCode.OK:
+            self.set_code(grpc.StatusCode.UNKNOWN)
+            raise grpc.RpcError()
 
-        self.set_code(status)
+        self.set_code(status.code)
+        self.set_details(status.details)
+        if self._trailing_metadata is None:
+            self.set_trailing_metadata(status.trailing_metadata)
+        else:
+            self.set_trailing_metadata(
+                tuple(self._trailing_metadata) + tuple(status.trailing_metadata)
+            )
 
         raise grpc.RpcError()
 

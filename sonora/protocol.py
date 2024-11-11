@@ -35,6 +35,8 @@ def b64_wrap_message(trailers, compressed, message):
 
 
 def unwrap_message(message):
+    if len(message) < _HEADER_LENGTH:
+        raise ValueError()
     flags, length = struct.unpack(_HEADER_FORMAT, message[:_HEADER_LENGTH])
     data = message[_HEADER_LENGTH : _HEADER_LENGTH + length]
 
@@ -226,6 +228,12 @@ _timeout_units = {
     b"m": 1 / 1000.0,
     b"u": 1 / 1000000.0,
     b"n": 1 / 1000000000.0,
+    "H": 3600.0,
+    "M": 60.0,
+    "S": 1.0,
+    "m": 1 / 1000.0,
+    "u": 1 / 1000000.0,
+    "n": 1 / 1000000000.0,
 }
 
 
