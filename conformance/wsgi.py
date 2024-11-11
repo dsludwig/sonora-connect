@@ -5,21 +5,21 @@ from connectrpc.conformance.v1 import service_pb2, service_pb2_grpc
 from google.protobuf.any_pb2 import Any
 from util import create_rich_error, headers_from_metadata, metadata_from_headers
 
-from sonora.asgi import grpcASGI
+from sonora.wsgi import grpcWSGI
 
 # Setup your frameworks default ASGI app.
 # Install the Sonora grpcASGI middleware so we can handle requests to gRPC's paths.
 
-asgi_app = grpcASGI()
+wsgi_app = grpcWSGI()
 
 
 # Attach your gRPC server implementation.
 class ConformanceServiceServicer(service_pb2_grpc.ConformanceServiceServicer):
-    async def Unary(
+    def Unary(
         self, request: service_pb2.UnaryRequest, context: grpc.ServicerContext
     ) -> service_pb2.UnaryResponse:
         response_definition = request.response_definition
-        await context.send_initial_metadata(
+        context.send_initial_metadata(
             metadata_from_headers(response_definition.response_headers)
         )
         context.set_trailing_metadata(
@@ -36,7 +36,7 @@ class ConformanceServiceServicer(service_pb2_grpc.ConformanceServiceServicer):
 
         if response_definition.HasField("error"):
             status = create_rich_error(response_definition.error, request_info)
-            await context.abort_with_status(status)
+            context.abort_with_status(status)
 
         if response_definition.response_delay_ms:
             time.sleep(response_definition.response_delay_ms / 1000)
@@ -50,5 +50,5 @@ class ConformanceServiceServicer(service_pb2_grpc.ConformanceServiceServicer):
 
 
 service_pb2_grpc.add_ConformanceServiceServicer_to_server(
-    ConformanceServiceServicer(), asgi_app
+    ConformanceServiceServicer(), wsgi_app
 )
