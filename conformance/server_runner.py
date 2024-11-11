@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import asyncio
 import logging
 import pathlib
 import shutil
@@ -8,10 +9,10 @@ import tempfile
 import threading
 import time
 
-import asgiref
 import asgiref.wsgi
-import daphne
-import daphne.server
+import hypercorn
+import hypercorn.asyncio
+import hypercorn.run
 from asgi import asgi_app
 from connectrpc.conformance.v1.server_compat_pb2 import (
     ServerCompatRequest,
@@ -33,13 +34,13 @@ def write_response(response):
     sys.stdout.buffer.flush()
 
 
-def start_asgi(request, asgi=asgi_app):
-    wait = threading.Barrier(1)
+def start_server(request, app):
     port = get_open_port()
-    endpoint = f"tcp:port={port}:interface=localhost"
     response = ServerCompatResponse(host="localhost", port=port)
 
     tmpdir = None
+    cfg = hypercorn.Config()
+    cfg.bind = [f"localhost:{port}"]
     if request.use_tls:
         tmpdir = pathlib.Path(tempfile.mkdtemp())
         server_creds = request.server_creds
@@ -48,33 +49,20 @@ def start_asgi(request, asgi=asgi_app):
         keyfile.write_bytes(server_creds.key)
         certfile.write_bytes(server_creds.cert)
         response.pem_cert = server_creds.cert
-        endpoint = f"ssl:port={port}:interface=localhost:privateKey={str(keyfile)}:certKey={str(certfile)}"
-    server = daphne.server.Server(
-        asgi,
-        endpoints=[endpoint],
-        ready_callable=wait.reset,
-    )
+        cfg.certfile = str(certfile)
+        cfg.keyfile = str(keyfile)
 
-    def run_server():
-        server.run()
+    def notify_caller():
+        time.sleep(0.1)
+        write_response(response)
 
-    threading.Thread(target=run_server).start()
-    wait.wait()
-    write_response(response)
+    threading.Thread(target=notify_caller).start()
 
     try:
-        while True:
-            time.sleep(3600)
+        asyncio.run(hypercorn.asyncio.serve(app, cfg))
     except KeyboardInterrupt:
-        # TODO: we're being killed with some other signal...
-        server.stop()
         if tmpdir is not None:
             shutil.rmtree(tmpdir)
-
-
-def start_wsgi(request):
-    asgi = asgiref.wsgi.WsgiToAsgi(wsgi_app)
-    start_asgi(request, asgi)
 
 
 def main():
@@ -97,9 +85,9 @@ def main():
     )
 
     if "--wsgi" in sys.argv:
-        start_wsgi(request)
+        start_server(request, asgiref.wsgi.WsgiToAsgi(wsgi_app))
     else:
-        start_asgi(request)
+        start_server(request, asgi_app)
 
 
 if __name__ == "__main__":
