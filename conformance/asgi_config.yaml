@@ -4,6 +4,7 @@ features:
     - HTTP_VERSION_2
   protocols:
     - PROTOCOL_GRPC_WEB
+    - PROTOCOL_GRPC
   codecs:
     - CODEC_PROTO
     - CODEC_JSON
@@ -12,7 +13,7 @@ features:
   stream_types:
     - STREAM_TYPE_UNARY
 
-  supports_trailers: false
+  supports_trailers: true
   supports_tls: true
   supports_tls_client_certs: false
   supports_h2c: false

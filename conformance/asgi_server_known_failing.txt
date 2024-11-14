@@ -1,8 +1,7 @@
-# The conformance client generates the wrong error for this test
-Errors/*/Protocol:PROTOCOL_GRPC_WEB/**/unary/unknown
-
-# This test looks like it is not defined correctly (no compression defined)
+# This test looks like it is not defined correctly (no compression defined?)
 gRPC-Web Unexpected Requests/**/unexpected-compressed-message
+gRPC Unexpected Requests/**/unexpected-compressed-message
 
 # TODO: need to greedily consume request stream for single request RPCs
 gRPC-Web Unexpected Requests/**/multiple-requests
+gRPC Unexpected Requests/**/multiple-requests

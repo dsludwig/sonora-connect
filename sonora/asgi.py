@@ -77,6 +77,10 @@ class grpcASGI(grpc.Server):
         timeout = None
         metadata = []
 
+        trailers_supported = (
+            scope.get("extensions", {}).get("http.response.trailers") is not None
+        )
+
         for header, value in scope["headers"]:
             if timeout is None and header == b"grpc-timeout":
                 timeout = protocol.parse_timeout(value)
@@ -88,7 +92,12 @@ class grpcASGI(grpc.Server):
 
                 metadata.append((header.decode("ascii"), value))
 
-        return ServicerContext(timeout, metadata, enable_cors=self._enable_cors)
+        return ServicerContext(
+            timeout,
+            metadata,
+            enable_cors=self._enable_cors,
+            enable_trailers=trailers_supported,
+        )
 
     async def _do_grpc_request(self, rpc_method, context, receive, send):
         headers = context._response_headers
@@ -225,34 +234,53 @@ class grpcASGI(grpc.Server):
 
         trailer_message = protocol.pack_trailers(trailers)
         trailer_data = wrap_message(True, False, trailer_message)
+        trailers_enabled = context._enable_trailers
 
-        content_length = len(message_data) + len(trailer_data)
+        content_length = len(message_data) + (
+            0 if trailers_enabled else len(trailer_data)
+        )
 
         headers.append((b"content-length", str(content_length).encode()))
+        if trailers_enabled:
+            headers.append((b"trailers", b"grpc-status"))
 
         await send(
-            {"type": "http.response.start", "status": status, "headers": headers}
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": headers,
+                "trailers": trailers_enabled,
+            }
         )
 
         await send(
-            {"type": "http.response.body", "body": message_data, "more_body": True}
+            {
+                "type": "http.response.body",
+                "body": message_data,
+                "more_body": not trailers_enabled,
+            }
         )
 
-        await send(
-            {"type": "http.response.body", "body": trailer_data, "more_body": False}
-        )
+        if trailers_enabled:
+            await send(
+                {
+                    "type": "http.response.trailers",
+                    "headers": tuple(
+                        (name.encode("ascii"), value.encode("utf-8"))
+                        for name, value in trailers
+                    ),
+                    "more_trailers": False,
+                }
+            )
+        else:
+            await send(
+                {"type": "http.response.body", "body": trailer_data, "more_body": False}
+            )
 
     async def _do_grpc_error(self, send, context):
-        status = 200
+        status = context._status_code
         headers = context._response_headers
         headers.append((b"grpc-status", str(context.code.value[0]).encode()))
-
-        # If Content-Type does not begin with "application/grpc", gRPC servers
-        # SHOULD respond with HTTP status of 415 (Unsupported Media Type). This
-        # will prevent other HTTP/2 clients from interpreting a gRPC error
-        # response, which uses status 200 (OK), as successful.
-        if context.code == grpc.StatusCode.UNKNOWN:
-            status = 415
 
         if context.details:
             headers.append(
@@ -313,11 +341,14 @@ class grpcASGI(grpc.Server):
 
 
 class ServicerContext(grpc.ServicerContext):
-    def __init__(self, timeout=None, metadata=None, enable_cors=True):
+    def __init__(
+        self, timeout=None, metadata=None, enable_cors=True, enable_trailers=False
+    ):
         self.code = grpc.StatusCode.OK
         self.details = None
 
         self._timeout = timeout
+        self._status_code = 200
 
         if timeout is not None:
             self._deadline = time.monotonic() + timeout
@@ -330,6 +361,7 @@ class ServicerContext(grpc.ServicerContext):
 
         response_content_type = "application/grpc-web+proto"
 
+        self._enable_trailers = False
         self._wrap_message = protocol.wrap_message
         self._unwrap_message = protocol.unwrap_message_asgi
         self._make_serializer = lambda i: i
@@ -345,12 +377,34 @@ class ServicerContext(grpc.ServicerContext):
                     self._make_serializer = protocol.serialize_json
                     self._make_deserializer = protocol.deserialize_json
                     response_content_type = "application/grpc-web+json"
-                elif value not in (
+                elif value in (
                     "application/grpc-web",
                     "application/grpc-web+proto",
                 ):
+                    pass
+                elif value == "application/grpc+json" and enable_trailers:
+                    self._make_serializer = protocol.serialize_json
+                    self._make_deserializer = protocol.deserialize_json
+                    self._enable_trailers = True
+                    response_content_type = "application/grpc+json"
+                elif (
+                    value
+                    in (
+                        "application/grpc",
+                        "application/grpc+proto",
+                    )
+                    and enable_trailers
+                ):
+                    response_content_type = "application/grpc+proto"
+                    self._enable_trailers = True
+                else:
                     self.code = grpc.StatusCode.UNKNOWN
                     self.details = "Unsupported content-type"
+                    # If Content-Type does not begin with "application/grpc", gRPC servers
+                    # SHOULD respond with HTTP status of 415 (Unsupported Media Type). This
+                    # will prevent other HTTP/2 clients from interpreting a gRPC error
+                    # response, which uses status 200 (OK), as successful.
+                    self._status_code = 415
             elif header == "accept":
                 response_content_type = value.split(",")[0].strip()
             elif header == "host":
