@@ -1,4 +1,4 @@
-import time
+import asyncio
 import typing
 
 import grpc
@@ -40,7 +40,7 @@ class ConformanceServiceServicer(service_pb2_grpc.ConformanceServiceServicer):
             await context.abort_with_status(status)
 
         if response_definition.response_delay_ms:
-            time.sleep(response_definition.response_delay_ms / 1000)
+            await asyncio.sleep(response_definition.response_delay_ms / 1000)
 
         return service_pb2.UnaryResponse(
             payload=service_pb2.ConformancePayload(
@@ -83,7 +83,7 @@ class ConformanceServiceServicer(service_pb2_grpc.ConformanceServiceServicer):
             await context.abort_with_status(status)
 
         if response_definition.response_delay_ms:
-            time.sleep(response_definition.response_delay_ms / 1000)
+            await asyncio.sleep(response_definition.response_delay_ms / 1000)
 
         return service_pb2.ClientStreamResponse(
             payload=service_pb2.ConformancePayload(
