@@ -152,7 +152,9 @@ class grpcASGI(grpc.Server):
     async def _do_streaming_response(
         self, rpc_method, receive, send, wrap_message, context, coroutine
     ):
+        make_serializer = context._make_serializer
         headers = context._response_headers
+        serializer = make_serializer(rpc_method.response_serializer)
 
         if coroutine:
             message = await anext(coroutine, default=None)
@@ -164,7 +166,7 @@ class grpcASGI(grpc.Server):
         if message is None:
             body = None
         else:
-            body = wrap_message(False, False, rpc_method.response_serializer(message))
+            body = wrap_message(False, False, serializer(message))
 
         if context._initial_metadata:
             headers.extend(context._initial_metadata)
@@ -178,9 +180,7 @@ class grpcASGI(grpc.Server):
             await send({"type": "http.response.body", "body": body, "more_body": True})
 
             async for message in coroutine:
-                body = wrap_message(
-                    False, False, rpc_method.response_serializer(message)
-                )
+                body = wrap_message(False, False, serializer(message))
 
                 send_task = asyncio.create_task(
                     send(
