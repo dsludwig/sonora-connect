@@ -10,6 +10,27 @@ from util import create_rich_error, headers_from_metadata, metadata_from_headers
 
 from sonora.asgi import grpcASGI
 
+# Copied from https://github.com/python/cpython/pull/8895
+_NOT_PROVIDED = object()
+
+
+async def anext(async_iterator, default=_NOT_PROVIDED):
+    """anext(async_iterator[, default])
+    Return the next item from the async iterator.
+    If default is given and the iterator is exhausted,
+    it is returned instead of raising StopAsyncIteration.
+    """
+    if not isinstance(async_iterator, typing.AsyncIterator):
+        raise TypeError(f"anext expected an AsyncIterator, got {type(async_iterator)}")
+    anxt = async_iterator.__anext__
+    try:
+        return await anxt()
+    except StopAsyncIteration:
+        if default is _NOT_PROVIDED:
+            raise
+        return default
+
+
 # Setup your frameworks default ASGI app.
 # Install the Sonora grpcASGI middleware so we can handle requests to gRPC's paths.
 
@@ -139,6 +160,119 @@ class ConformanceServiceServicer(service_pb2_grpc.ConformanceServiceServicer):
 
         if response_definition.HasField("error"):
             if first_response:
+                status = create_rich_error(response_definition.error, request_info)
+            else:
+                error = response_definition.error
+                status = rpc_status.to_status(
+                    status_pb2.Status(
+                        code=error.code,
+                        message=error.message,
+                        details=error.details,
+                    )
+                )
+
+            await context.abort_with_status(status)
+
+    async def BidiStream(
+        self,
+        requests: typing.AsyncIterable[service_pb2.BidiStreamRequest],
+        context: grpc.ServicerContext,
+    ) -> typing.AsyncGenerator[service_pb2.BidiStreamResponse, None]:
+        first_request = True
+        full_duplex = False
+        request_data = []
+        response_definition = None
+        response_index = 0
+        async for request in requests:
+            request_any = Any()
+            request_any.Pack(request)
+            request_data.append(request_any)
+
+            if first_request:
+                response_definition = request.response_definition
+                full_duplex = request.full_duplex
+
+                await context.send_initial_metadata(
+                    metadata_from_headers(response_definition.response_headers)
+                )
+                context.set_trailing_metadata(
+                    metadata_from_headers(response_definition.response_trailers)
+                )
+                first_request = False
+
+            if full_duplex:
+                if response_index >= len(response_definition.response_data):
+                    break
+
+                if response_index == 0:
+                    time_remaining = context.time_remaining()
+                    request_info = service_pb2.ConformancePayload.RequestInfo(
+                        request_headers=headers_from_metadata(
+                            context.invocation_metadata()
+                        ),
+                        requests=request_data,
+                        timeout_ms=None
+                        if time_remaining is None
+                        else int(time_remaining * 1000),
+                    )
+                else:
+                    request_info = service_pb2.ConformancePayload.RequestInfo(
+                        requests=[request_any],
+                    )
+
+                if response_definition.response_delay_ms:
+                    await asyncio.sleep(response_definition.response_delay_ms / 1000)
+
+                response = service_pb2.BidiStreamResponse(
+                    payload=service_pb2.ConformancePayload(
+                        request_info=request_info,
+                        data=response_definition.response_data[response_index],
+                    )
+                )
+
+                response_index += 1
+                yield response
+
+        while response_index < len(response_definition.response_data):
+            if response_index == 0:
+                time_remaining = context.time_remaining()
+                request_info = service_pb2.ConformancePayload.RequestInfo(
+                    request_headers=headers_from_metadata(
+                        context.invocation_metadata()
+                    ),
+                    requests=request_data,
+                    timeout_ms=None
+                    if time_remaining is None
+                    else int(time_remaining * 1000),
+                )
+            else:
+                request_info = None
+
+            response = service_pb2.BidiStreamResponse(
+                payload=service_pb2.ConformancePayload(
+                    request_info=request_info,
+                    data=response_definition.response_data[response_index],
+                )
+            )
+
+            if response_definition.response_delay_ms:
+                await asyncio.sleep(response_definition.response_delay_ms / 1000)
+
+            response_index += 1
+            yield response
+
+        if response_definition.HasField("error"):
+            if response_index == 0:
+                time_remaining = context.time_remaining()
+                request_info = service_pb2.ConformancePayload.RequestInfo(
+                    request_headers=headers_from_metadata(
+                        context.invocation_metadata()
+                    ),
+                    requests=request_data,
+                    timeout_ms=None
+                    if time_remaining is None
+                    else int(time_remaining * 1000),
+                )
                 status = create_rich_error(response_definition.error, request_info)
             else:
                 error = response_definition.error
