@@ -132,6 +132,10 @@ class grpcASGI(grpc.Server):
                 request_proto = await anext(request_proto_iterator, None)
                 if request_proto is None:
                     raise NotImplementedError()
+                # If more than one request is provided to a unary request,
+                # that is a protocol error.
+                if await anext(request_proto_iterator, None) is not None:
+                    raise NotImplementedError()
                 coroutine = method(request_proto, context)
         except NotImplementedError:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
