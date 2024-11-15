@@ -3,16 +3,17 @@ features:
     # - HTTP_VERSION_1
     - HTTP_VERSION_2
   protocols:
-    # - PROTOCOL_GRPC_WEB
+    - PROTOCOL_GRPC_WEB
     - PROTOCOL_GRPC
   codecs:
-    - CODEC_PROTO
-    # - CODEC_JSON
+    # - CODEC_PROTO
+    - CODEC_JSON
   compressions:
     - COMPRESSION_IDENTITY
   stream_types:
-    # - STREAM_TYPE_UNARY
+    - STREAM_TYPE_UNARY
     - STREAM_TYPE_CLIENT_STREAM
+    - STREAM_TYPE_SERVER_STREAM
 
   supports_trailers: true
   supports_tls: true

@@ -28,7 +28,10 @@ class grpcASGI(grpc.Server):
         to the next application.
         """
         if not scope["type"] == "http":
-            return await self._application(scope, receive, send)
+            if self._application:
+                return await self._application(scope, receive, send)
+            else:
+                return
 
         rpc_method = self._get_rpc_handler(scope["path"])
         request_method = scope["method"]
@@ -152,13 +155,16 @@ class grpcASGI(grpc.Server):
         headers = context._response_headers
 
         if coroutine:
-            message = await anext(coroutine)
+            message = await anext(coroutine, default=None)
         else:
-            message = b""
+            message = None
 
         status = 200
 
-        body = wrap_message(False, False, rpc_method.response_serializer(message))
+        if message is None:
+            body = None
+        else:
+            body = wrap_message(False, False, rpc_method.response_serializer(message))
 
         if context._initial_metadata:
             headers.extend(context._initial_metadata)
@@ -166,29 +172,35 @@ class grpcASGI(grpc.Server):
         await send(
             {"type": "http.response.start", "status": status, "headers": headers}
         )
+        context._started_response = True
 
-        await send({"type": "http.response.body", "body": body, "more_body": True})
+        if body is not None:
+            await send({"type": "http.response.body", "body": body, "more_body": True})
 
-        async for message in coroutine:
-            body = wrap_message(False, False, rpc_method.response_serializer(message))
+            async for message in coroutine:
+                body = wrap_message(
+                    False, False, rpc_method.response_serializer(message)
+                )
 
-            send_task = asyncio.create_task(
-                send({"type": "http.response.body", "body": body, "more_body": True})
-            )
+                send_task = asyncio.create_task(
+                    send(
+                        {"type": "http.response.body", "body": body, "more_body": True}
+                    )
+                )
 
-            recv_task = asyncio.create_task(receive())
+                recv_task = asyncio.create_task(receive())
 
-            done, pending = await asyncio.wait(
-                {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
-            )
+                done, pending = await asyncio.wait(
+                    {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+                )
 
-            if recv_task in done:
-                send_task.cancel()
-                result = recv_task.result()
-                if result["type"] == "http.disconnect":
-                    break
-            else:
-                recv_task.cancel()
+                if recv_task in done:
+                    send_task.cancel()
+                    result = recv_task.result()
+                    if result["type"] == "http.disconnect":
+                        break
+                else:
+                    recv_task.cancel()
 
         trailers = [("grpc-status", str(context.code.value[0]))]
 
@@ -198,9 +210,23 @@ class grpcASGI(grpc.Server):
         if context._trailing_metadata:
             trailers.extend(context._trailing_metadata)
 
-        trailer_message = protocol.pack_trailers(trailers)
-        body = wrap_message(True, False, trailer_message)
-        await send({"type": "http.response.body", "body": body, "more_body": False})
+        if context._enable_trailers:
+            await send(
+                {
+                    "type": "http.response.trailers",
+                    "headers": tuple(
+                        (name.encode("ascii"), value.encode("utf-8"))
+                        for name, value in trailers
+                    ),
+                    "more_trailers": False,
+                }
+            )
+        else:
+            trailer_message = protocol.pack_trailers(trailers)
+            trailer_data = wrap_message(True, False, trailer_message)
+            await send(
+                {"type": "http.response.body", "body": trailer_data, "more_body": False}
+            )
 
     async def _do_unary_response(
         self, rpc_method, receive, send, wrap_message, context, coroutine
@@ -252,6 +278,7 @@ class grpcASGI(grpc.Server):
                 "trailers": trailers_enabled,
             }
         )
+        context._started_response = True
 
         await send(
             {
@@ -278,8 +305,10 @@ class grpcASGI(grpc.Server):
             )
 
     async def _do_grpc_error(self, send, context):
+        wrap_message = context._wrap_message
         status = context._status_code
         headers = context._response_headers
+        trailers_enabled = context._enable_trailers
         headers.append((b"grpc-status", str(context.code.value[0]).encode()))
 
         if context.details:
@@ -287,7 +316,7 @@ class grpcASGI(grpc.Server):
                 (b"grpc-message", quote(context.details.encode("utf8")).encode("ascii"))
             )
 
-        if context._initial_metadata:
+        if context._initial_metadata and not context._started_response:
             headers.extend(context._initial_metadata)
 
         if context._trailing_metadata:
@@ -296,10 +325,41 @@ class grpcASGI(grpc.Server):
                 for name, value in context._trailing_metadata
             )
 
-        await send(
-            {"type": "http.response.start", "status": status, "headers": headers}
-        )
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+        if context._started_response:
+            # If the response has already started, we must transmit the error as a
+            # trailer.
+            if trailers_enabled:
+                await send(
+                    {
+                        "type": "http.response.trailers",
+                        "headers": headers,
+                        "more_trailers": False,
+                    }
+                )
+            else:
+                # TODO: mixed bytes and strings all over the place
+                # trailer_message = protocol.pack_trailers(headers)
+                data = bytearray()
+                for k, v in headers:
+                    k = k.lower()
+                    data.extend(k)
+                    data.extend(b": ")
+                    data.extend(v)
+                    data.extend(b"\r\n")
+                trailer_message = bytes(data)
+                trailer_data = wrap_message(True, False, trailer_message)
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": trailer_data,
+                        "more_body": False,
+                    }
+                )
+        else:
+            await send(
+                {"type": "http.response.start", "status": status, "headers": headers}
+            )
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
 
     async def _do_cors_preflight(self, scope, receive, send):
         origin = next(
@@ -413,6 +473,8 @@ class ServicerContext(grpc.ServicerContext):
                 if value.lower() != "identity":
                     self.code = grpc.StatusCode.UNIMPLEMENTED
                     self.details = "Unsupported encoding"
+
+        self._started_response = False
 
         if not origin:
             raise ValueError("Request is missing the host header")
