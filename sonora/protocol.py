@@ -122,6 +122,23 @@ b64_unwrap_message_asgi = functools.partial(
 )
 
 
+async def bare_unwrap_message(receive):
+    body = bytearray()
+    while True:
+        event = await receive()
+        assert event["type"].startswith("http.")
+        body.extend(event["body"])
+
+        if not event.get("more_body"):
+            break
+
+    yield False, False, body
+
+
+def bare_wrap_message(_trailers, _compressed, message):
+    return message
+
+
 def pack_trailers(trailers):
     data = bytearray()
     for k, v in trailers:
@@ -174,6 +191,31 @@ def serialize_json(response_serializer):
         return json_format.MessageToJson(message).encode()
 
     return serializer
+
+
+_STATUS_CODE_MAP = {
+    grpc.StatusCode.OK: 200,
+    grpc.StatusCode.CANCELLED: 499,
+    grpc.StatusCode.UNKNOWN: 500,
+    grpc.StatusCode.INVALID_ARGUMENT: 400,
+    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+    grpc.StatusCode.NOT_FOUND: 404,
+    grpc.StatusCode.ALREADY_EXISTS: 409,
+    grpc.StatusCode.PERMISSION_DENIED: 403,
+    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
+    grpc.StatusCode.FAILED_PRECONDITION: 400,
+    grpc.StatusCode.ABORTED: 409,
+    grpc.StatusCode.OUT_OF_RANGE: 400,
+    grpc.StatusCode.UNIMPLEMENTED: 501,
+    grpc.StatusCode.INTERNAL: 500,
+    grpc.StatusCode.UNAVAILABLE: 503,
+    grpc.StatusCode.DATA_LOSS: 500,
+    grpc.StatusCode.UNAUTHENTICATED: 401,
+}
+
+
+def status_code_to_http(status_code):
+    return _STATUS_CODE_MAP.get(status_code, 500)
 
 
 class WebRpcError(grpc.RpcError):

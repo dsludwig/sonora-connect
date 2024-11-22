@@ -81,7 +81,10 @@ class grpcASGI(grpc.Server):
         metadata = []
 
         trailers_supported = (
-            scope.get("extensions", {}).get("http.response.trailers") is not None
+            # supported by client
+            scope["http_version"] == "2"
+            # and server
+            and scope.get("extensions", {}).get("http.response.trailers") is not None
         )
 
         for header, value in scope["headers"]:
@@ -120,6 +123,7 @@ class grpcASGI(grpc.Server):
             raise NotImplementedError
 
         deserializer = make_deserializer(rpc_method.request_deserializer)
+        # TODO: check the compressed flag
         request_proto_iterator = (
             deserializer(bytes(message))
             async for _, _, message in unwrap_message(receive)
@@ -267,12 +271,16 @@ class grpcASGI(grpc.Server):
         trailers_enabled = context._enable_trailers
 
         content_length = len(message_data) + (
-            0 if trailers_enabled else len(trailer_data)
+            0 if (trailers_enabled or context._connect) else len(trailer_data)
         )
 
         headers.append((b"content-length", str(content_length).encode()))
         if trailers_enabled:
             headers.append((b"trailers", b"grpc-status"))
+        if context._connect:
+            headers.extend(
+                (f"trailer-{name}".encode(), value.encode()) for name, value in trailers
+            )
 
         await send(
             {
@@ -288,7 +296,7 @@ class grpcASGI(grpc.Server):
             {
                 "type": "http.response.body",
                 "body": message_data,
-                "more_body": not trailers_enabled,
+                "more_body": not (trailers_enabled or context._connect),
             }
         )
 
@@ -303,12 +311,78 @@ class grpcASGI(grpc.Server):
                     "more_trailers": False,
                 }
             )
-        else:
+        elif not context._connect:
             await send(
                 {"type": "http.response.body", "body": trailer_data, "more_body": False}
             )
 
+    async def _do_connect_error(self, send, context):
+        # serializer = protocol.serialize_json
+        # wrap_message = protocol.bare_wrap_message
+
+        # import sys
+
+        status = protocol.status_code_to_http(context.code)
+        # print(context.code, grpc.StatusCode(context.code), status, file=sys.stderr)
+
+        # import grpc
+        # TODO: google.rpc.Status ? grpc.Status
+        error = {"code": context.code.name.lower()}
+        if context.details:
+            error["message"] = context.details
+
+        # headers = []
+        headers = context._response_headers
+        if context._initial_metadata and not context._started_response:
+            headers.extend(context._initial_metadata)
+
+        if context._trailing_metadata:
+            for name, value in context._trailing_metadata:
+                if name.lower() == "grpc-status-details-bin":
+                    # TODO: it's annoying to have to round trip this
+                    from google.rpc import status_pb2
+
+                    _, padlength = divmod(len(value), 8)
+                    padvalue = value + "=" * padlength
+                    binvalue = base64.b64decode(padvalue)
+                    status_details = status_pb2.Status()
+                    status_details.ParseFromString(binvalue)
+                    # print(status_details, file=sys.stderr)
+
+                    error["details"] = [
+                        {
+                            "type": d.type_url.rpartition("/")[2],
+                            # "type_url": d.type_url,
+                            "value": base64.b64encode(d.value).decode().rstrip("="),
+                        }
+                        for d in status_details.details
+                    ]
+
+                    # print(error["details"], file=sys.stderr)
+                else:
+                    headers.append((name.encode("ascii"), value.encode("utf-8")))
+
+        if context._started_response:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        else:
+            import json
+
+            error_body = json.dumps(error)
+            await send(
+                {"type": "http.response.start", "status": status, "headers": headers}
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": error_body.encode(),
+                    "more_body": False,
+                }
+            )
+
     async def _do_grpc_error(self, send, context):
+        if context._connect:
+            return await self._do_connect_error(send, context)
+
         wrap_message = context._wrap_message
         status = context._status_code
         headers = context._response_headers
@@ -425,6 +499,8 @@ class ServicerContext(grpc.ServicerContext):
 
         response_content_type = "application/grpc-web+proto"
 
+        self._connect = False
+        # TODO: protocol details should probably not live here?
         self._enable_trailers = False
         self._wrap_message = protocol.wrap_message
         self._unwrap_message = protocol.unwrap_message_asgi
@@ -441,6 +517,18 @@ class ServicerContext(grpc.ServicerContext):
                     self._make_serializer = protocol.serialize_json
                     self._make_deserializer = protocol.deserialize_json
                     response_content_type = "application/grpc-web+json"
+                elif value == "application/proto":
+                    response_content_type = "application/proto"
+                    self._wrap_message = protocol.bare_wrap_message
+                    self._unwrap_message = protocol.bare_unwrap_message
+                    self._connect = True
+                elif value == "application/json":
+                    response_content_type = "application/json"
+                    self._wrap_message = protocol.bare_wrap_message
+                    self._unwrap_message = protocol.bare_unwrap_message
+                    self._make_serializer = protocol.serialize_json
+                    self._make_deserializer = protocol.deserialize_json
+                    self._connect = True
                 elif value in (
                     "application/grpc-web",
                     "application/grpc-web+proto",
@@ -478,7 +566,9 @@ class ServicerContext(grpc.ServicerContext):
                     self.code = grpc.StatusCode.UNIMPLEMENTED
                     self.details = "Unsupported encoding"
 
+        # TODO: protocol state machine should probably not live here.
         self._started_response = False
+        print("connect mode: ", self._connect)
 
         if not origin:
             raise ValueError("Request is missing the host header")
