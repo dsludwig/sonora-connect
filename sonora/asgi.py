@@ -53,7 +53,7 @@ class grpcASGI(grpc.Server):
             elif self._enable_cors and request_method == "OPTIONS":
                 await self._do_cors_preflight(scope, receive, send)
             else:
-                await send({"type": "http.response.start", "status": 400})
+                await send({"type": "http.response.start", "status": 405})
                 await send(
                     {"type": "http.response.body", "body": b"", "more_body": False}
                 )
@@ -343,6 +343,11 @@ class grpcASGI(grpc.Server):
         headers = context._response_headers
         if context._initial_metadata and not context._started_response:
             headers.extend(context._initial_metadata)
+
+        headers = [
+            (name, value) for name, value in headers if name.lower() != b"content-type"
+        ]
+        headers.append((b"content-type", b"application/json"))
 
         if context._trailing_metadata:
             for name, value in context._trailing_metadata:
