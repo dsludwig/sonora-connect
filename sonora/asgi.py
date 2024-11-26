@@ -90,6 +90,8 @@ class grpcASGI(grpc.Server):
         for header, value in scope["headers"]:
             if timeout is None and header == b"grpc-timeout":
                 timeout = protocol.parse_timeout(value)
+            elif timeout is None and header == b"connect-timeout-ms":
+                timeout = int(value) / 1000
             else:
                 if header.endswith(b"-bin"):
                     value = base64.b64decode(value)
@@ -247,6 +249,9 @@ class grpcASGI(grpc.Server):
         else:
             message = await coroutine
 
+        if context.code != grpc.StatusCode.OK:
+            return await self._do_grpc_error(send, context)
+
         status = 200
 
         if context._initial_metadata:
@@ -327,7 +332,10 @@ class grpcASGI(grpc.Server):
 
         # import grpc
         # TODO: google.rpc.Status ? grpc.Status
-        error = {"code": context.code.name.lower()}
+        code = context.code.name.lower()
+        if code == "cancelled":
+            code = "canceled"
+        error = {"code": code}
         if context.details:
             error["message"] = context.details
 
