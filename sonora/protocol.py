@@ -30,6 +30,13 @@ def wrap_message(trailers, compressed, message):
     )
 
 
+def wrap_message_connect(trailers, compressed, message):
+    return (
+        struct.pack(_HEADER_FORMAT, trailers << 1 | compressed << 0, len(message))
+        + message
+    )
+
+
 def b64_wrap_message(trailers, compressed, message):
     return base64.b64encode(wrap_message(trailers, compressed, message))
 

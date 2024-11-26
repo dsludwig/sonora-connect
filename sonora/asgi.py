@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import time
 from collections import namedtuple
 from collections.abc import AsyncIterator
@@ -212,6 +213,9 @@ class grpcASGI(grpc.Server):
                 else:
                     recv_task.cancel()
 
+        if context.code != grpc.StatusCode.OK and context._connect:
+            return await self._do_connect_error(send, context)
+
         trailers = [("grpc-status", str(context.code.value[0]))]
 
         if context.details:
@@ -230,6 +234,15 @@ class grpcASGI(grpc.Server):
                     ),
                     "more_trailers": False,
                 }
+            )
+        elif context._connect:
+            trailer_dict = {}
+            for name, value in trailers:
+                trailer_dict.setdefault(name, []).append(value)
+            trailer_message = json.dumps({"metadata": trailer_dict}).encode()
+            trailer_data = wrap_message(True, False, trailer_message)
+            await send(
+                {"type": "http.response.body", "body": trailer_data, "more_body": False}
             )
         else:
             trailer_message = protocol.pack_trailers(trailers)
@@ -327,7 +340,10 @@ class grpcASGI(grpc.Server):
 
         # import sys
 
-        status = protocol.status_code_to_http(context.code)
+        if context._connect_stream:
+            status = 200
+        else:
+            status = protocol.status_code_to_http(context.code)
         # print(context.code, grpc.StatusCode(context.code), status, file=sys.stderr)
 
         # import grpc
@@ -344,11 +360,16 @@ class grpcASGI(grpc.Server):
         if context._initial_metadata and not context._started_response:
             headers.extend(context._initial_metadata)
 
-        headers = [
-            (name, value) for name, value in headers if name.lower() != b"content-type"
-        ]
-        headers.append((b"content-type", b"application/json"))
+        if not context._connect_stream:
+            # set correct content-type for unary errors
+            headers = [
+                (name, value)
+                for name, value in headers
+                if name.lower() != b"content-type"
+            ]
+            headers.append((b"content-type", b"application/json"))
 
+        trailers = {}
         if context._trailing_metadata:
             for name, value in context._trailing_metadata:
                 if name.lower() == "grpc-status-details-bin":
@@ -372,22 +393,35 @@ class grpcASGI(grpc.Server):
                     ]
 
                     # print(error["details"], file=sys.stderr)
+                elif context._connect_stream:
+                    trailers.setdefault(name, []).append(value)
                 else:
                     headers.append((name.encode("ascii"), value.encode("utf-8")))
 
         if context._started_response:
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            error_body = context._wrap_message(
+                True, False, json.dumps({"error": error, "metadata": trailers}).encode()
+            )
+            await send(
+                {"type": "http.response.body", "body": error_body, "more_body": False}
+            )
         else:
-            import json
+            if context._connect_stream:
+                error_body = context._wrap_message(
+                    True,
+                    False,
+                    json.dumps({"error": error, "metadata": trailers}).encode(),
+                )
+            else:
+                error_body = json.dumps(error).encode()
 
-            error_body = json.dumps(error)
             await send(
                 {"type": "http.response.start", "status": status, "headers": headers}
             )
             await send(
                 {
                     "type": "http.response.body",
-                    "body": error_body.encode(),
+                    "body": error_body,
                     "more_body": False,
                 }
             )
@@ -513,6 +547,7 @@ class ServicerContext(grpc.ServicerContext):
         response_content_type = "application/grpc-web+proto"
 
         self._connect = False
+        self._connect_stream = False
         # TODO: protocol details should probably not live here?
         self._enable_trailers = False
         self._wrap_message = protocol.wrap_message
@@ -530,6 +565,18 @@ class ServicerContext(grpc.ServicerContext):
                     self._make_serializer = protocol.serialize_json
                     self._make_deserializer = protocol.deserialize_json
                     response_content_type = "application/grpc-web+json"
+                elif value == "application/connect+proto":
+                    self._wrap_message = protocol.wrap_message_connect
+                    self._connect = True
+                    self._connect_stream = True
+                    response_content_type = "application/connect+proto"
+                elif value == "application/connect+json":
+                    self._make_serializer = protocol.serialize_json
+                    self._make_deserializer = protocol.deserialize_json
+                    self._wrap_message = protocol.wrap_message_connect
+                    self._connect = True
+                    self._connect_stream = True
+                    response_content_type = "application/connect+json"
                 elif value == "application/proto":
                     response_content_type = "application/proto"
                     self._wrap_message = protocol.bare_wrap_message
