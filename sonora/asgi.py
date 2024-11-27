@@ -288,17 +288,30 @@ class grpcASGI(grpc.Server):
         trailer_data = wrap_message(True, False, trailer_message)
         trailers_enabled = context._enable_trailers
 
+        if context._connect:
+            if context._connect_stream:
+                trailer_dict = {}
+                for name, value in trailers:
+                    trailer_dict.setdefault(name, []).append(value)
+                trailer_message = json.dumps({"metadata": trailer_dict}).encode()
+                trailer_data = protocol.wrap_message_connect(
+                    True, False, trailer_message
+                )
+            else:
+                headers.extend(
+                    (f"trailer-{name}".encode(), value.encode())
+                    for name, value in trailers
+                )
+
         content_length = len(message_data) + (
-            0 if (trailers_enabled or context._connect) else len(trailer_data)
+            0
+            if (trailers_enabled or context._connect and not context._connect_stream)
+            else len(trailer_data)
         )
 
         headers.append((b"content-length", str(content_length).encode()))
         if trailers_enabled:
             headers.append((b"trailers", b"grpc-status"))
-        if context._connect:
-            headers.extend(
-                (f"trailer-{name}".encode(), value.encode()) for name, value in trailers
-            )
 
         await send(
             {
@@ -314,7 +327,9 @@ class grpcASGI(grpc.Server):
             {
                 "type": "http.response.body",
                 "body": message_data,
-                "more_body": not (trailers_enabled or context._connect),
+                "more_body": not (
+                    trailers_enabled or context._connect and not context._connect_stream
+                ),
             }
         )
 
@@ -329,7 +344,7 @@ class grpcASGI(grpc.Server):
                     "more_trailers": False,
                 }
             )
-        elif not context._connect:
+        elif not context._connect or context._connect_stream:
             await send(
                 {"type": "http.response.body", "body": trailer_data, "more_body": False}
             )
@@ -567,6 +582,7 @@ class ServicerContext(grpc.ServicerContext):
                     response_content_type = "application/grpc-web+json"
                 elif value == "application/connect+proto":
                     self._wrap_message = protocol.wrap_message_connect
+                    self._unwrap_message = protocol.unwrap_message_asgi_connect
                     self._connect = True
                     self._connect_stream = True
                     response_content_type = "application/connect+proto"
@@ -574,6 +590,7 @@ class ServicerContext(grpc.ServicerContext):
                     self._make_serializer = protocol.serialize_json
                     self._make_deserializer = protocol.deserialize_json
                     self._wrap_message = protocol.wrap_message_connect
+                    self._unwrap_message = protocol.unwrap_message_asgi_connect
                     self._connect = True
                     self._connect_stream = True
                     response_content_type = "application/connect+json"

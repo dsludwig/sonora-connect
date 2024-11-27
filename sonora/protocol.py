@@ -14,6 +14,10 @@ def _pack_header_flags(trailers, compressed):
     return (trailers << 7) | (compressed)
 
 
+def _pack_header_flags_connect(trailers, compressed):
+    return (trailers << 1) | (compressed)
+
+
 def _unpack_header_flags(flags):
     trailers = 1 << 7
     compressed = 1
@@ -21,27 +25,32 @@ def _unpack_header_flags(flags):
     return bool(trailers & flags), bool(compressed & flags)
 
 
-def wrap_message(trailers, compressed, message):
+def _unpack_header_flags_connect(flags):
+    trailers = 1 << 1
+    compressed = 1
+
+    return bool(trailers & flags), bool(compressed & flags)
+
+
+def wrap_message(trailers, compressed, message, pack_header_flags=_pack_header_flags):
     return (
         struct.pack(
-            _HEADER_FORMAT, _pack_header_flags(trailers, compressed), len(message)
+            _HEADER_FORMAT, pack_header_flags(trailers, compressed), len(message)
         )
         + message
     )
 
 
-def wrap_message_connect(trailers, compressed, message):
-    return (
-        struct.pack(_HEADER_FORMAT, trailers << 1 | compressed << 0, len(message))
-        + message
-    )
+wrap_message_connect = functools.partial(
+    wrap_message, pack_header_flags=_pack_header_flags_connect
+)
 
 
 def b64_wrap_message(trailers, compressed, message):
     return base64.b64encode(wrap_message(trailers, compressed, message))
 
 
-def unwrap_message(message):
+def unwrap_message(message, unpack_header_flags=_unpack_header_flags):
     if len(message) < _HEADER_LENGTH:
         raise ValueError()
     flags, length = struct.unpack(_HEADER_FORMAT, message[:_HEADER_LENGTH])
@@ -50,16 +59,21 @@ def unwrap_message(message):
     if length != len(data):
         raise ValueError()
 
-    trailers, compressed = _unpack_header_flags(flags)
+    trailers, compressed = unpack_header_flags(flags)
 
     return trailers, compressed, data
+
+
+unwrap_message_connect = functools.partial(
+    unwrap_message, unpack_header_flags=_unpack_header_flags_connect
+)
 
 
 def b64_unwrap_message(message):
     return unwrap_message(base64.b64decode(message))
 
 
-def unwrap_message_stream(stream):
+def unwrap_message_stream(stream, unpack_header_flags=_unpack_header_flags):
     data = stream.read(_HEADER_LENGTH)
 
     while data:
@@ -74,7 +88,7 @@ def unwrap_message_stream(stream):
         data = stream.read(_HEADER_LENGTH)
 
 
-async def unwrap_message_stream_async(stream):
+async def unwrap_message_stream_async(stream, unpack_header_flags=_unpack_header_flags):
     data = await stream.readexactly(_HEADER_LENGTH)
 
     while data:
@@ -89,7 +103,9 @@ async def unwrap_message_stream_async(stream):
         data = await stream.readexactly(_HEADER_LENGTH)
 
 
-async def unwrap_message_asgi(receive, decoder=None):
+async def unwrap_message_asgi(
+    receive, decoder=None, unpack_header_flags=_unpack_header_flags
+):
     buffer = bytearray()
     waiting = False
     flags = None
@@ -113,7 +129,7 @@ async def unwrap_message_asgi(receive, decoder=None):
             if len(buffer) >= _HEADER_LENGTH + length:
                 waiting = False
                 data = buffer[_HEADER_LENGTH : _HEADER_LENGTH + length]
-                trailers, compressed = _unpack_header_flags(flags)
+                trailers, compressed = unpack_header_flags(flags)
 
                 yield trailers, compressed, data
                 buffer = buffer[_HEADER_LENGTH + length :]
@@ -126,6 +142,11 @@ async def unwrap_message_asgi(receive, decoder=None):
 
 b64_unwrap_message_asgi = functools.partial(
     unwrap_message_asgi, decoder=base64.b64decode
+)
+
+unwrap_message_asgi_connect = functools.partial(
+    unwrap_message_asgi,
+    unpack_header_flags=_unpack_header_flags_connect,
 )
 
 
