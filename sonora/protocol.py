@@ -78,7 +78,7 @@ def unwrap_message_stream(stream, unpack_header_flags=_unpack_header_flags):
 
     while data:
         flags, length = struct.unpack(_HEADER_FORMAT, data)
-        trailers, compressed = _unpack_header_flags(flags)
+        trailers, compressed = unpack_header_flags(flags)
 
         yield trailers, compressed, stream.read(length)
 
@@ -93,7 +93,7 @@ async def unwrap_message_stream_async(stream, unpack_header_flags=_unpack_header
 
     while data:
         flags, length = struct.unpack(_HEADER_FORMAT, data)
-        trailers, compressed = _unpack_header_flags(flags)
+        trailers, compressed = unpack_header_flags(flags)
 
         yield trailers, compressed, await stream.readexactly(length)
 
