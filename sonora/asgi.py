@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import logging
 import time
@@ -97,7 +96,7 @@ class grpcASGI(grpc.Server):
                 timeout = int(value) / 1000
             else:
                 if header.endswith(b"-bin"):
-                    value = base64.b64decode(value)
+                    value = protocol.b64decode(value)
                 else:
                     value = value.decode("ascii")
 
@@ -361,19 +360,11 @@ class grpcASGI(grpc.Server):
             )
 
     async def _do_connect_error(self, send, context):
-        # serializer = protocol.serialize_json
-        # wrap_message = protocol.bare_wrap_message
-
-        # import sys
-
         if context._connect_stream:
             status = 200
         else:
             status = protocol.status_code_to_http(context.code)
-        # print(context.code, grpc.StatusCode(context.code), status, file=sys.stderr)
 
-        # import grpc
-        # TODO: google.rpc.Status ? grpc.Status
         code = context.code.name.lower()
         if code == "cancelled":
             code = "canceled"
@@ -381,7 +372,6 @@ class grpcASGI(grpc.Server):
         if context.details:
             error["message"] = context.details
 
-        # headers = []
         headers = context._response_headers
         if context._initial_metadata and not context._started_response:
             headers.extend(context._initial_metadata)
@@ -402,23 +392,16 @@ class grpcASGI(grpc.Server):
                     # TODO: it's annoying to have to round trip this
                     from google.rpc import status_pb2
 
-                    _, padlength = divmod(len(value), 8)
-                    padvalue = value + "=" * padlength
-                    binvalue = base64.b64decode(padvalue)
+                    binvalue = protocol.b64decode(value)
                     status_details = status_pb2.Status()
                     status_details.ParseFromString(binvalue)
-                    # print(status_details, file=sys.stderr)
-
                     error["details"] = [
                         {
                             "type": d.type_url.rpartition("/")[2],
-                            # "type_url": d.type_url,
-                            "value": base64.b64encode(d.value).decode().rstrip("="),
+                            "value": protocol.b64encode(d.value),
                         }
                         for d in status_details.details
                     ]
-
-                    # print(error["details"], file=sys.stderr)
                 elif context._connect_stream:
                     trailers.setdefault(name, []).append(value)
                 else:

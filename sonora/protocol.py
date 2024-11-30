@@ -6,6 +6,22 @@ from urllib.parse import unquote
 import grpc
 from google.protobuf import json_format
 
+
+def b64encode(value):
+    # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+    # Implementations MUST accept padded and un-padded values and should emit un-padded values.
+    return base64.b64encode(value).decode("ascii").rstrip("=")
+
+
+def b64decode(value):
+    # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+    # Implementations MUST accept padded and un-padded values and should emit un-padded values.
+    _, padlength = divmod(len(value), 8)
+    padvalue = value + "=" * padlength
+    binvalue = base64.b64decode(padvalue)
+    return binvalue
+
+
 _HEADER_FORMAT = ">BI"
 _HEADER_LENGTH = struct.calcsize(_HEADER_FORMAT)
 
@@ -47,7 +63,7 @@ wrap_message_connect = functools.partial(
 
 
 def b64_wrap_message(trailers, compressed, message):
-    return base64.b64encode(wrap_message(trailers, compressed, message))
+    return b64encode(wrap_message(trailers, compressed, message))
 
 
 def unwrap_message(message, unpack_header_flags=_unpack_header_flags):
@@ -70,7 +86,7 @@ unwrap_message_connect = functools.partial(
 
 
 def b64_unwrap_message(message):
-    return unwrap_message(base64.b64decode(message))
+    return unwrap_message(b64decode(message))
 
 
 def unwrap_message_stream(stream, unpack_header_flags=_unpack_header_flags):
@@ -140,9 +156,7 @@ async def unwrap_message_asgi(
             break
 
 
-b64_unwrap_message_asgi = functools.partial(
-    unwrap_message_asgi, decoder=base64.b64decode
-)
+b64_unwrap_message_asgi = functools.partial(unwrap_message_asgi, decoder=b64decode)
 
 unwrap_message_asgi_connect = functools.partial(
     unwrap_message_asgi,
@@ -204,9 +218,7 @@ def encode_headers(metadata):
             if not header.endswith("-bin"):
                 raise ValueError("binary headers must have the '-bin' suffix")
 
-            # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
-            # Implementations should emit unpadded values
-            value = base64.b64encode(value).decode("ascii").rstrip("=")
+            value = b64encode(value)
 
         if isinstance(header, bytes):
             header = header.decode("ascii")
