@@ -1,0 +1,2 @@
+# asgiref WSGI implementation seems to timeout sometimes.
+Deadline Propagation/**/success

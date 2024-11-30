@@ -77,15 +77,21 @@ class grpcWSGI(grpc.Server):
         context = self._create_context(environ)
 
         unwrap_message = protocol.unwrap_message
+        deserialize = rpc_method.request_deserializer
+        serialize = rpc_method.response_serializer
+
         content_type = environ["CONTENT_TYPE"]
         if content_type == "application/grpc-web-text":
             unwrap_message = protocol.b64_unwrap_message
         elif content_type in (
             "application/grpc-web",
             "application/grpc-web+proto",
-            "application/grpc-web+json",
         ):
             unwrap_message = protocol.unwrap_message
+        elif content_type == "application/grpc-web+json":
+            unwrap_message = protocol.unwrap_message
+            deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
+            serialize = protocol.serialize_json(rpc_method.response_serializer)
         else:
             context.set_details(b"Unsupported content-type")
             context.set_code(grpc.StatusCode.UNKNOWN)
@@ -105,7 +111,7 @@ class grpcWSGI(grpc.Server):
                     )
                     context.set_code(grpc.StatusCode.INTERNAL)
                 else:
-                    request_proto = rpc_method.request_deserializer(message)
+                    request_proto = deserialize(message)
             except ValueError:
                 pass
         else:
@@ -131,9 +137,7 @@ class grpcWSGI(grpc.Server):
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
 
         response_content_type = (
-            environ.get("HTTP_ACCEPT", "application/grpc-web+proto")
-            .split(",")[0]
-            .strip()
+            environ.get("HTTP_ACCEPT", content_type).split(",")[0].strip()
         )
 
         headers = [
@@ -155,16 +159,35 @@ class grpcWSGI(grpc.Server):
 
         if rpc_method.response_streaming:
             yield from self._do_streaming_response(
-                rpc_method, start_response, wrap_message, context, headers, resp
+                rpc_method,
+                start_response,
+                serialize,
+                wrap_message,
+                context,
+                headers,
+                resp,
             )
 
         else:
             yield from self._do_unary_response(
-                rpc_method, start_response, wrap_message, context, headers, resp
+                rpc_method,
+                start_response,
+                serialize,
+                wrap_message,
+                context,
+                headers,
+                resp,
             )
 
     def _do_streaming_response(
-        self, rpc_method, start_response, wrap_message, context, headers, resp
+        self,
+        rpc_method,
+        start_response,
+        serialize,
+        wrap_message,
+        context,
+        headers,
+        resp,
     ):
         first_message = None
         if resp is not None:
@@ -179,16 +202,12 @@ class grpcWSGI(grpc.Server):
         start_response("200 OK", headers)
 
         if first_message is not None:
-            yield wrap_message(
-                False, False, rpc_method.response_serializer(first_message)
-            )
+            yield wrap_message(False, False, serialize(first_message))
 
         if resp is not None:
             try:
                 for message in resp:
-                    yield wrap_message(
-                        False, False, rpc_method.response_serializer(message)
-                    )
+                    yield wrap_message(False, False, serialize(message))
             except (grpc.RpcError, StopIteration):
                 pass
 
@@ -205,12 +224,17 @@ class grpcWSGI(grpc.Server):
         yield wrap_message(True, False, trailer_message)
 
     def _do_unary_response(
-        self, rpc_method, start_response, wrap_message, context, headers, resp
+        self,
+        rpc_method,
+        start_response,
+        serialize,
+        wrap_message,
+        context,
+        headers,
+        resp,
     ):
         if resp:
-            message_data = wrap_message(
-                False, False, rpc_method.response_serializer(resp)
-            )
+            message_data = wrap_message(False, False, serialize(resp))
         else:
             message_data = b""
 
