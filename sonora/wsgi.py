@@ -87,21 +87,30 @@ class grpcWSGI(grpc.Server):
         ):
             unwrap_message = protocol.unwrap_message
         else:
-            message = b""
+            context.set_details(b"Unsupported content-type")
             context.set_code(grpc.StatusCode.UNKNOWN)
 
         request_proto = None
         resp = None
 
         if environ.get("HTTP_GRPC_ENCODING", "identity") != "identity":
-            message = b"Unsupported encoding"
+            context.set_details(b"Unsupported encoding")
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        else:
+        elif request_data:
             try:
-                _, _, message = unwrap_message(request_data)
-                request_proto = rpc_method.request_deserializer(message)
+                _, compressed, message = unwrap_message(request_data)
+                if compressed:
+                    context.set_details(
+                        b"Cannot decode compressed message with `identity` encoder"
+                    )
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                else:
+                    request_proto = rpc_method.request_deserializer(message)
             except ValueError:
                 pass
+        else:
+            # Empty body
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
 
         if request_proto:
             try:
@@ -157,10 +166,12 @@ class grpcWSGI(grpc.Server):
     def _do_streaming_response(
         self, rpc_method, start_response, wrap_message, context, headers, resp
     ):
-        try:
-            first_message = next(resp)
-        except (grpc.RpcError, StopIteration):
-            first_message = None
+        first_message = None
+        if resp is not None:
+            try:
+                first_message = next(resp)
+            except (grpc.RpcError, StopIteration):
+                pass
 
         if context._initial_metadata:
             headers.extend(context._initial_metadata)
@@ -172,13 +183,14 @@ class grpcWSGI(grpc.Server):
                 False, False, rpc_method.response_serializer(first_message)
             )
 
-        try:
-            for message in resp:
-                yield wrap_message(
-                    False, False, rpc_method.response_serializer(message)
-                )
-        except grpc.RpcError:
-            pass
+        if resp is not None:
+            try:
+                for message in resp:
+                    yield wrap_message(
+                        False, False, rpc_method.response_serializer(message)
+                    )
+            except (grpc.RpcError, StopIteration):
+                pass
 
         trailers = [("grpc-status", str(context.code.value[0]))]
 
@@ -220,7 +232,11 @@ class grpcWSGI(grpc.Server):
 
         headers.append(("content-length", str(content_length)))
 
-        if context.code == grpc.StatusCode.UNKNOWN:
+        # ew
+        if (
+            context.code == grpc.StatusCode.UNKNOWN
+            and context.details == b"Unsupported content-type"
+        ):
             start_response("415 Unsupported Media Type", headers)
         else:
             start_response("200 OK", headers)
@@ -390,7 +406,10 @@ class ServicerContext(grpc.ServicerContext):
 def _timeout_generator(context, gen):
     while 1:
         if context.time_remaining() > 0:
-            yield next(gen)
+            try:
+                yield next(gen)
+            except StopIteration:
+                return
         else:
             context.code = grpc.StatusCode.DEADLINE_EXCEEDED
             context.details = "request timed out at the server"
