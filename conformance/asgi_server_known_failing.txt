@@ -1,4 +1,1 @@
-# TODO: need to check compressed flag on messages
-gRPC-Web Unexpected Requests/**/unexpected-compressed-message
-gRPC Unexpected Requests/**/unexpected-compressed-message
-Connect Unexpected Requests/**/unexpected-compression
+# No known failures.

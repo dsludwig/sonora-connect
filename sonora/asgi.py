@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import time
 from collections import namedtuple
 from collections.abc import AsyncIterator
@@ -21,6 +22,7 @@ class grpcASGI(grpc.Server):
         self._application = application
         self._handlers = []
         self._enable_cors = enable_cors
+        self._log = logging.getLogger(__name__)
 
     async def __call__(self, scope, receive, send):
         """
@@ -110,6 +112,7 @@ class grpcASGI(grpc.Server):
 
     async def _do_grpc_request(self, rpc_method, context, receive, send):
         headers = context._response_headers
+        decode_message = context._decode_message
         wrap_message = context._wrap_message
         unwrap_message = context._unwrap_message
         make_deserializer = context._make_deserializer
@@ -126,12 +129,12 @@ class grpcASGI(grpc.Server):
             raise NotImplementedError
 
         deserializer = make_deserializer(rpc_method.request_deserializer)
-        # TODO: check the compressed flag
         request_proto_iterator = (
-            deserializer(bytes(message))
-            async for _, _, message in unwrap_message(receive)
+            deserializer(decode_message(compressed, bytes(message)))
+            async for _, compressed, message in unwrap_message(receive)
         )
 
+        coroutine = None
         try:
             if rpc_method.request_streaming:
                 coroutine = method(request_proto_iterator, context)
@@ -146,7 +149,8 @@ class grpcASGI(grpc.Server):
                 coroutine = method(request_proto, context)
         except NotImplementedError:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            coroutine = None
+        except protocol.ProtocolError:
+            context.set_code(grpc.StatusCode.INTERNAL)
 
         try:
             if rpc_method.response_streaming:
@@ -158,6 +162,13 @@ class grpcASGI(grpc.Server):
                     rpc_method, receive, send, wrap_message, context, coroutine
                 )
         except grpc.RpcError:
+            await self._do_grpc_error(send, context)
+        except protocol.ProtocolError:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            await self._do_grpc_error(send, context)
+        except Exception:
+            self._log.exception("Error in RPC handler")
+            context.set_code(grpc.StatusCode.INTERNAL)
             await self._do_grpc_error(send, context)
 
     async def _do_streaming_response(
@@ -565,6 +576,7 @@ class ServicerContext(grpc.ServicerContext):
         self._connect_stream = False
         # TODO: protocol details should probably not live here?
         self._enable_trailers = False
+        self._decode_message = protocol.decode_identity
         self._wrap_message = protocol.wrap_message
         self._unwrap_message = protocol.unwrap_message_asgi
         self._make_serializer = lambda i: i
@@ -639,6 +651,10 @@ class ServicerContext(grpc.ServicerContext):
             elif header == "host":
                 origin = value
             elif header == "grpc-encoding":
+                if value.lower() != "identity":
+                    self.code = grpc.StatusCode.UNIMPLEMENTED
+                    self.details = "Unsupported encoding"
+            elif header == "content-encoding":
                 if value.lower() != "identity":
                     self.code = grpc.StatusCode.UNIMPLEMENTED
                     self.details = "Unsupported encoding"

@@ -167,6 +167,16 @@ def bare_wrap_message(_trailers, _compressed, message):
     return message
 
 
+class ProtocolError(Exception):
+    pass
+
+
+def decode_identity(compressed, message):
+    if compressed:
+        raise ProtocolError("Cannot decode compressed message with `identity` encoder")
+    return message
+
+
 def pack_trailers(trailers):
     data = bytearray()
     for k, v in trailers:
