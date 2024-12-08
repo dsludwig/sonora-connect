@@ -9,7 +9,9 @@ import tempfile
 import threading
 import time
 
-import asgiref.wsgi
+import a2wsgi.wsgi
+
+# import asgiref.wsgi
 import hypercorn
 import hypercorn.asyncio
 import hypercorn.run
@@ -85,7 +87,7 @@ def main():
     )
 
     if "--wsgi" in sys.argv:
-        start_server(request, asgiref.wsgi.WsgiToAsgi(wsgi_app))
+        start_server(request, a2wsgi.wsgi.WSGIMiddleware(wsgi_app))
     else:
         start_server(request, asgi_app)
 

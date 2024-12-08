@@ -34,6 +34,7 @@ black = {version = "^21.12b0", allow-prereleases = true}
 [tool.poetry.group.dev.dependencies]
 twisted = {version = "^24.10.0", extras = ["http2"]}
 nonecorn = "^0.17.3"
+a2wsgi = "^1.10.7"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

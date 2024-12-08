@@ -1,4 +1,5 @@
 import base64
+import logging
 import time
 from collections import namedtuple
 from urllib.parse import quote
@@ -24,6 +25,7 @@ class grpcWSGI(grpc.Server):
         self._application = application
         self._handlers = []
         self._enable_cors = enable_cors
+        self._log = logging.getLogger(__name__)
 
     def add_generic_rpc_handlers(self, handlers):
         self._handlers.extend(handlers)
@@ -72,8 +74,6 @@ class grpcWSGI(grpc.Server):
         return ServicerContext(timeout, metadata)
 
     def _do_grpc_request(self, rpc_method, environ, start_response):
-        request_data = self._read_request(environ)
-
         context = self._create_context(environ)
 
         unwrap_message = protocol.unwrap_message
@@ -81,6 +81,7 @@ class grpcWSGI(grpc.Server):
         serialize = rpc_method.response_serializer
 
         content_type = environ["CONTENT_TYPE"]
+        response_content_type = "application/grpc-web+proto"
         if content_type == "application/grpc-web-text":
             unwrap_message = protocol.b64_unwrap_message
         elif content_type in (
@@ -89,6 +90,7 @@ class grpcWSGI(grpc.Server):
         ):
             unwrap_message = protocol.unwrap_message
         elif content_type == "application/grpc-web+json":
+            response_content_type = "application/grpc-web+json"
             unwrap_message = protocol.unwrap_message
             deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
             serialize = protocol.serialize_json(rpc_method.response_serializer)
@@ -96,49 +98,58 @@ class grpcWSGI(grpc.Server):
             context.set_details(b"Unsupported content-type")
             context.set_code(grpc.StatusCode.UNKNOWN)
 
-        request_proto = None
         resp = None
+        request_proto_iterator = None
 
         if environ.get("HTTP_GRPC_ENCODING", "identity") != "identity":
             context.set_details(b"Unsupported encoding")
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        elif request_data:
-            try:
-                _, compressed, message = unwrap_message(request_data)
-                if compressed:
-                    context.set_details(
-                        b"Cannot decode compressed message with `identity` encoder"
-                    )
-                    context.set_code(grpc.StatusCode.INTERNAL)
-                else:
-                    request_proto = deserialize(message)
-            except ValueError:
-                pass
+        elif context.code == grpc.StatusCode.OK:
+            decode_message = protocol.decode_identity
+            stream = environ["wsgi.input"]
+            request_proto_iterator = (
+                deserialize(decode_message(compressed, bytes(message)))
+                for _, compressed, message in protocol.unwrap_message_stream(stream)
+            )
+
+        if not rpc_method.request_streaming and not rpc_method.response_streaming:
+            method = rpc_method.unary_unary
+        elif not rpc_method.request_streaming and rpc_method.response_streaming:
+            method = rpc_method.unary_stream
+        elif rpc_method.request_streaming and not rpc_method.response_streaming:
+            method = rpc_method.stream_unary
+        elif rpc_method.request_streaming and rpc_method.response_streaming:
+            method = rpc_method.stream_stream
         else:
-            # Empty body
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
 
-        if request_proto:
+        if request_proto_iterator:
             try:
-                if (
-                    not rpc_method.request_streaming
-                    and not rpc_method.response_streaming
-                ):
-                    resp = rpc_method.unary_unary(request_proto, context)
-                elif not rpc_method.request_streaming and rpc_method.response_streaming:
-                    resp = rpc_method.unary_stream(request_proto, context)
+                if rpc_method.request_streaming:
+                    resp = method(request_proto_iterator, context)
+                else:
+                    request_proto = next(request_proto_iterator, None)
+                    if request_proto is None:
+                        raise NotImplementedError()
+                    # If more than one request is provided to a unary request,
+                    # that is a protocol error.
+                    if next(request_proto_iterator, None) is not None:
+                        raise NotImplementedError()
+
+                    resp = method(request_proto, context)
+
+                if rpc_method.response_streaming:
                     if context.time_remaining() is not None:
                         resp = _timeout_generator(context, resp)
-                else:
-                    raise NotImplementedError()
             except grpc.RpcError:
                 pass
             except NotImplementedError:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-
-        response_content_type = (
-            environ.get("HTTP_ACCEPT", content_type).split(",")[0].strip()
-        )
+            except protocol.ProtocolError:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            except Exception:
+                logging.exception("Exception handling RPC method")
+                context.set_code(grpc.StatusCode.INTERNAL)
 
         headers = [
             ("Content-Type", response_content_type),
