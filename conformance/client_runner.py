@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import base64
 import collections
 import concurrent.futures
@@ -15,7 +16,8 @@ import time
 import traceback
 from typing import Any, List, Tuple
 
-import grpc
+import aiohttp
+import grpc.aio
 from connectrpc.conformance.v1 import (
     client_compat_pb2,
     config_pb2,
@@ -268,9 +270,6 @@ def handle_message(
 
         except grpc.RpcError as e:
             status = rpc_status.from_call(e)
-            if status is None:
-                logger.debug("headers: %r", e.initial_metadata())
-                logger.debug("trailers: %r", e.trailing_metadata())
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
                 response=client_compat_pb2.ClientResponseResult(
@@ -297,10 +296,218 @@ def handle_message(
             )
 
 
-def main():
-    if "--debug" in sys.argv:
-        logging.basicConfig(level=logging.DEBUG)
+async def handle_message_async(
+    msg: client_compat_pb2.ClientCompatRequest,
+) -> client_compat_pb2.ClientCompatResponse:
+    if msg.use_get_http_method:
+        return client_compat_pb2.ClientCompatResponse(
+            test_name=msg.test_name,
+            error=client_compat_pb2.ClientErrorResult(
+                message="TODO HTTP GET NOT IMPLEMENTED"
+            ),
+        )
 
+    reqs = unpack_requests(msg.request_messages)
+
+    http1 = msg.http_version in [
+        config_pb2.HTTP_VERSION_1,
+        config_pb2.HTTP_VERSION_UNSPECIFIED,
+    ]
+    http2 = msg.http_version in [
+        config_pb2.HTTP_VERSION_2,
+        config_pb2.HTTP_VERSION_UNSPECIFIED,
+    ]
+    ssl_context = None
+    if msg.server_tls_cert:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_context.check_hostname = False
+        ssl_context.load_verify_locations(cadata=msg.server_tls_cert.decode("utf8"))
+        proto = "https"
+    else:
+        proto = "http"
+
+    url = f"{proto}://{msg.host}:{msg.port}"
+
+    if msg.request_delay_ms > 0:
+        time.sleep(msg.request_delay_ms / 1000.0)
+
+    if msg.protocol == config_pb2.PROTOCOL_GRPC:
+        assert not http1
+        assert http2
+        channel = grpc.aio.secure_channel(
+            f"{msg.host}:{msg.port}",
+            credentials=grpc.ssl_channel_credentials(
+                root_certificates=msg.server_tls_cert
+            ),
+        )
+    elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        channel = sonora.aio.insecure_web_channel(
+            url, session_kws={"connector": connector}
+        )
+    else:
+        return client_compat_pb2.ClientCompatResponse(
+            test_name=msg.test_name,
+            error=client_compat_pb2.ClientErrorResult(
+                message=f"TODO unknown message type: {any.TypeName()}"
+            ),
+        )
+
+    payloads = []
+    async with channel:
+        try:
+            client = service_pb2_grpc.ConformanceServiceStub(channel)
+            if msg.stream_type == config_pb2.STREAM_TYPE_UNARY:
+                req = next(reqs)
+                call = getattr(client, msg.method)(
+                    req,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+                resp = await call
+                payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(await call.initial_metadata()),
+                        response_trailers=to_pb_headers(await call.trailing_metadata()),
+                    ),
+                )
+            elif msg.stream_type == config_pb2.STREAM_TYPE_SERVER_STREAM:
+                req = next(reqs)
+                call = getattr(client, msg.method)(
+                    req,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+                async for resp in call:
+                    payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(await call.initial_metadata()),
+                        response_trailers=to_pb_headers(await call.trailing_metadata()),
+                    ),
+                )
+            elif msg.stream_type == config_pb2.STREAM_TYPE_CLIENT_STREAM:
+                call = getattr(client, msg.method)(
+                    reqs,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+
+                resp = await call
+                payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(await call.initial_metadata()),
+                        response_trailers=to_pb_headers(await call.trailing_metadata()),
+                    ),
+                )
+            elif msg.stream_type in (
+                config_pb2.STREAM_TYPE_HALF_DUPLEX_BIDI_STREAM,
+                config_pb2.STREAM_TYPE_FULL_DUPLEX_BIDI_STREAM,
+            ):
+                call = getattr(client, msg.method)(
+                    reqs,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+
+                async for resp in call:
+                    payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(await call.initial_metadata()),
+                        response_trailers=to_pb_headers(await call.trailing_metadata()),
+                    ),
+                )
+
+        except grpc.RpcError as e:
+            status = rpc_status.from_call(e)
+            return client_compat_pb2.ClientCompatResponse(
+                test_name=msg.test_name,
+                response=client_compat_pb2.ClientResponseResult(
+                    payloads=payloads,
+                    error=service_pb2.Error(
+                        code=getattr(
+                            config_pb2,
+                            f"CODE_{e.code().name.upper().replace('CANCELLED','CANCELED')}",
+                        ),
+                        message=e.details(),
+                        details=status.details if status is not None else None,
+                    ),
+                    http_status_code=200,
+                    response_headers=to_pb_headers(e.initial_metadata()),
+                    response_trailers=to_pb_headers(e.trailing_metadata()),
+                ),
+            )
+        except Exception as e:
+            return client_compat_pb2.ClientCompatResponse(
+                test_name=msg.test_name,
+                error=client_compat_pb2.ClientErrorResult(
+                    message="\n".join(traceback.format_exception(e))
+                ),
+            )
+
+
+def run_async():
+    loop = asyncio.new_event_loop()
+
+    async def run_message(req):
+        try:
+            resp = await handle_message_async(req)
+        except Exception as e:
+            resp = client_compat_pb2.ClientCompatResponse(
+                test_name=req.test_name,
+                error=client_compat_pb2.ClientErrorResult(
+                    message="\n".join(traceback.format_exception(e))
+                ),
+            )
+
+        logger.info("Finishing request: %s", req.test_name)
+        write_response(resp)
+
+    async def read_requests():
+        while req := await loop.run_in_executor(None, read_request):
+            logger.info("Enqueuing request: %s", req.test_name)
+            loop.create_task(run_message(req))
+
+    loop.run_until_complete(read_requests())
+    logger.info("All done")
+
+
+def run_sync():
     output_lock = threading.Lock()
 
     def handle_done_message(req, fut):
@@ -326,6 +533,16 @@ def main():
                 functools.partial(handle_done_message, req)
             )
     logger.info("All done")
+
+
+def main():
+    if "--debug" in sys.argv:
+        logging.basicConfig(level=logging.DEBUG)
+
+    if "--async" in sys.argv:
+        run_async()
+    else:
+        run_sync()
 
 
 if __name__ == "__main__":

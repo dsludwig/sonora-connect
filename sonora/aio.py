@@ -4,22 +4,24 @@ import io
 import aiohttp
 import grpc.experimental.aio
 
-from sonora import protocol
 import sonora.client
+from sonora import protocol
 
 
-def insecure_web_channel(url):
-    return WebChannel(url)
+def insecure_web_channel(url, session_kws=None):
+    return WebChannel(url, session_kws)
 
 
 class WebChannel:
-    def __init__(self, url):
+    def __init__(self, url, session_kws=None):
         if not url.startswith("http") and "://" not in url:
             url = f"http://{url}"
 
         self._url = url
+        if session_kws is None:
+            session_kws = {}
 
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(**session_kws)
 
     async def __aenter__(self):
         return self

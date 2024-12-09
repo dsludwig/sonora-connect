@@ -73,6 +73,17 @@ class Multicallable:
         raise NotImplementedError()
 
 
+class NotImplementedMulticallable(Multicallable):
+    def __init__(self):
+        pass
+
+    def __call__(self, request, timeout=None):
+        def nope(*args, **kwargs):
+            raise NotImplementedError()
+
+        return nope
+
+
 class UnaryUnaryMulticallable(Multicallable):
     def __call__(self, request, timeout=None, metadata=None):
         result, _call = self.with_call(request, timeout, metadata)
