@@ -1,0 +1,7 @@
+# Reference client has some incompatibilities
+gRPC Unexpected Responses/**/ok-but-no-response
+gRPC Unexpected Responses/**/unexpected-compressed-message
+gRPC Unexpected Responses/**/unexpected-compression
+
+# Cancellation is not supported yet
+Client Cancellation/**

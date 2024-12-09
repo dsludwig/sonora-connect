@@ -1,2 +1,0 @@
-# This causes the grpc client to hang
-gRPC Unexpected Responses/HTTPVersion:2/TLS:true/unary/multiple-responses

@@ -93,20 +93,28 @@ def to_pb_headers(headers: List[Tuple[str, str]]) -> list[service_pb2.Header]:
         raise
 
 
+def unpack_requests(request_messages):
+    for any in request_messages:
+        logger.debug(f"{any.TypeName()=}")
+
+        req_types = {
+            "connectrpc.conformance.v1.IdempotentUnaryRequest": service_pb2.IdempotentUnaryRequest,
+            "connectrpc.conformance.v1.UnaryRequest": service_pb2.UnaryRequest,
+            "connectrpc.conformance.v1.UnimplementedRequest": service_pb2.UnimplementedRequest,
+            "connectrpc.conformance.v1.ServerStreamRequest": service_pb2.ServerStreamRequest,
+            "connectrpc.conformance.v1.ClientStreamRequest": service_pb2.ClientStreamRequest,
+            "connectrpc.conformance.v1.BidiStreamRequest": service_pb2.BidiStreamRequest,
+        }
+
+        req_type = req_types[any.TypeName()]
+        req = req_type()
+        any.Unpack(req)
+        yield req
+
+
 def handle_message(
     msg: client_compat_pb2.ClientCompatRequest,
 ) -> client_compat_pb2.ClientCompatResponse:
-    if msg.stream_type not in (
-        config_pb2.STREAM_TYPE_UNARY,
-        config_pb2.STREAM_TYPE_SERVER_STREAM,
-    ):
-        return client_compat_pb2.ClientCompatResponse(
-            test_name=msg.test_name,
-            error=client_compat_pb2.ClientErrorResult(
-                message="TODO STREAM TYPE NOT IMPLEMENTED"
-            ),
-        )
-
     if msg.use_get_http_method:
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
@@ -115,36 +123,7 @@ def handle_message(
             ),
         )
 
-    if len(msg.request_messages) > 1:
-        return client_compat_pb2.ClientCompatResponse(
-            test_name=msg.test_name,
-            error=client_compat_pb2.ClientErrorResult(
-                message="TODO MULTIPLE MESSAGES NOT IMPLEMENTED"
-            ),
-        )
-
-    logger.debug(f"** {msg.test_name} **")
-    any = msg.request_messages[0]
-    logger.debug(f"{any.TypeName()=}")
-
-    req_types = {
-        "connectrpc.conformance.v1.UnaryRequest": service_pb2.UnaryRequest,
-        "connectrpc.conformance.v1.UnimplementedRequest": service_pb2.UnimplementedRequest,
-        "connectrpc.conformance.v1.ServerStreamRequest": service_pb2.ServerStreamRequest,
-    }
-
-    try:
-        req_type = req_types[any.TypeName()]
-    except KeyError:
-        return client_compat_pb2.ClientCompatResponse(
-            test_name=msg.test_name,
-            error=client_compat_pb2.ClientErrorResult(
-                message=f"TODO unknown message type: {any.TypeName()}"
-            ),
-        )
-
-    req = req_type()
-    any.Unpack(req)
+    reqs = unpack_requests(msg.request_messages)
 
     http1 = msg.http_version in [
         config_pb2.HTTP_VERSION_1,
@@ -169,6 +148,8 @@ def handle_message(
         time.sleep(msg.request_delay_ms / 1000.0)
 
     if msg.protocol == config_pb2.PROTOCOL_GRPC:
+        assert not http1
+        assert http2
         channel = grpc.secure_channel(
             f"{msg.host}:{msg.port}",
             credentials=grpc.ssl_channel_credentials(
@@ -192,6 +173,7 @@ def handle_message(
         try:
             client = service_pb2_grpc.ConformanceServiceStub(channel)
             if msg.stream_type == config_pb2.STREAM_TYPE_UNARY:
+                req = next(reqs)
                 resp, call = getattr(client, msg.method).with_call(
                     req,
                     timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
@@ -213,6 +195,7 @@ def handle_message(
                     ),
                 )
             elif msg.stream_type == config_pb2.STREAM_TYPE_SERVER_STREAM:
+                req = next(reqs)
                 call = getattr(client, msg.method)(
                     req,
                     timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
@@ -222,6 +205,54 @@ def handle_message(
                         for value in h.value
                     ],
                 )
+                for resp in call:
+                    payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(call.initial_metadata()),
+                        response_trailers=to_pb_headers(call.trailing_metadata()),
+                    ),
+                )
+            elif msg.stream_type == config_pb2.STREAM_TYPE_CLIENT_STREAM:
+                resp, call = getattr(client, msg.method).with_call(
+                    reqs,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+
+                payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(call.initial_metadata()),
+                        response_trailers=to_pb_headers(call.trailing_metadata()),
+                    ),
+                )
+            elif msg.stream_type in (
+                config_pb2.STREAM_TYPE_HALF_DUPLEX_BIDI_STREAM,
+                config_pb2.STREAM_TYPE_FULL_DUPLEX_BIDI_STREAM,
+            ):
+                call = getattr(client, msg.method)(
+                    reqs,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+
                 for resp in call:
                     payloads.append(resp.payload)
 
