@@ -210,8 +210,8 @@ class grpcWSGI(grpc.Server):
                 context,
                 headers,
                 resp,
+                connect,
             )
-
         else:
             yield from self._do_unary_response(
                 rpc_method,
@@ -234,6 +234,7 @@ class grpcWSGI(grpc.Server):
         context,
         headers,
         resp,
+        connect,
     ):
         first_message = None
         if resp is not None:
@@ -267,7 +268,44 @@ class grpcWSGI(grpc.Server):
 
         trailer_message = protocol.pack_trailers(trailers)
 
-        yield wrap_message(True, False, trailer_message)
+        if connect:
+            if context.code != grpc.StatusCode.OK:
+                code = context.code.name.lower()
+                if code == "cancelled":
+                    code = "canceled"
+                error = {"code": code}
+                if context.details:
+                    error["message"] = context.details
+            else:
+                error = None
+
+            trailer_dict = {}
+            for name, value in trailers:
+                if name.lower() == "grpc-status-details-bin":
+                    # TODO: it's annoying to have to round trip this
+                    from google.rpc import status_pb2
+
+                    binvalue = protocol.b64decode(value)
+                    status_details = status_pb2.Status()
+                    status_details.ParseFromString(binvalue)
+                    error["details"] = [
+                        {
+                            "type": d.type_url.rpartition("/")[2],
+                            "value": protocol.b64encode(d.value),
+                        }
+                        for d in status_details.details
+                    ]
+                else:
+                    trailer_dict.setdefault(name, []).append(value)
+
+            trailer = {"metadata": trailer_dict}
+            if error:
+                trailer["error"] = error
+            trailer_message = json.dumps(trailer).encode()
+            trailer_data = wrap_message(True, False, trailer_message)
+            yield trailer_data
+        else:
+            yield wrap_message(True, False, trailer_message)
 
     def _do_unary_response(
         self,
