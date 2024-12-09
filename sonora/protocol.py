@@ -75,14 +75,19 @@ def b64_unwrap_message(message):
     return unwrap_message(b64decode(message))
 
 
-def unwrap_message_stream(stream, unpack_header_flags=_unpack_header_flags):
+def unwrap_message_stream(
+    stream, decoder=None, unpack_header_flags=_unpack_header_flags
+):
     data = stream.read(_HEADER_LENGTH)
 
     while data:
         flags, length = struct.unpack(_HEADER_FORMAT, data)
         trailers, compressed = unpack_header_flags(flags)
 
-        yield trailers, compressed, stream.read(length)
+        body = stream.read(length)
+        if decoder:
+            body = decoder(body)
+        yield trailers, compressed, body
 
         if trailers:
             break
@@ -142,6 +147,7 @@ async def unwrap_message_asgi(
             break
 
 
+b64_unwrap_message_stream = functools.partial(unwrap_message_stream, decoder=b64decode)
 b64_unwrap_message_asgi = functools.partial(unwrap_message_asgi, decoder=b64decode)
 
 unwrap_message_asgi_connect = functools.partial(
@@ -149,8 +155,12 @@ unwrap_message_asgi_connect = functools.partial(
     unpack_header_flags=_unpack_header_flags_connect,
 )
 
+unwrap_message_stream_connect = functools.partial(
+    unwrap_message_stream, unpack_header_flags=_unpack_header_flags_connect
+)
 
-async def bare_unwrap_message(receive):
+
+async def bare_unwrap_message_asgi(receive):
     body = bytearray()
     while True:
         event = await receive()
@@ -165,6 +175,10 @@ async def bare_unwrap_message(receive):
 
 def bare_wrap_message(_trailers, _compressed, message):
     return message
+
+
+def bare_unwrap_message_stream(stream, unpack_header_flags=_unpack_header_flags):
+    yield False, False, stream.read()
 
 
 class ProtocolError(Exception):

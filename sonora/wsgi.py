@@ -1,7 +1,9 @@
 import base64
+import json
 import logging
 import time
 from collections import namedtuple
+from http import HTTPStatus
 from urllib.parse import quote
 
 import grpc
@@ -60,6 +62,8 @@ class grpcWSGI(grpc.Server):
             timeout = protocol.parse_timeout(environ["HTTP_GRPC_TIMEOUT"])
         except KeyError:
             timeout = None
+        if timeout is None and environ.get("HTTP_CONNECT_TIMEOUT_MS"):
+            timeout = int(environ.get("HTTP_CONNECT_TIMEOUT_MS")) / 1000
 
         metadata = []
         for key, value in environ.items():
@@ -76,24 +80,55 @@ class grpcWSGI(grpc.Server):
     def _do_grpc_request(self, rpc_method, environ, start_response):
         context = self._create_context(environ)
 
-        unwrap_message = protocol.unwrap_message
+        wrap_message = protocol.wrap_message
+        unwrap_message_stream = protocol.unwrap_message_stream
         deserialize = rpc_method.request_deserializer
         serialize = rpc_method.response_serializer
 
+        connect = False
+        connect_stream = False
         content_type = environ["CONTENT_TYPE"]
         response_content_type = "application/grpc-web+proto"
         if content_type == "application/grpc-web-text":
-            unwrap_message = protocol.b64_unwrap_message
+            unwrap_message_stream = protocol.b64_unwrap_message_stream
+            wrap_message = protocol.b64_wrap_message
+            response_content_type = "application/grpc-web-text"
         elif content_type in (
             "application/grpc-web",
             "application/grpc-web+proto",
         ):
-            unwrap_message = protocol.unwrap_message
+            unwrap_message_stream = protocol.unwrap_message_stream
         elif content_type == "application/grpc-web+json":
             response_content_type = "application/grpc-web+json"
-            unwrap_message = protocol.unwrap_message
+            unwrap_message_stream = protocol.unwrap_message_stream
             deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
             serialize = protocol.serialize_json(rpc_method.response_serializer)
+        elif content_type == "application/connect+proto":
+            response_content_type = "application/connect+proto"
+            wrap_message = protocol.wrap_message_connect
+            unwrap_message_stream = protocol.unwrap_message_stream_connect
+            connect = True
+            connect_stream = True
+        elif content_type == "application/connect+json":
+            deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
+            serialize = protocol.serialize_json(rpc_method.response_serializer)
+            wrap_message = protocol.wrap_message_connect
+            unwrap_message_stream = protocol.unwrap_message_stream_connect
+            connect = True
+            connect_stream = True
+            response_content_type = "application/connect+json"
+        elif content_type == "application/proto":
+            response_content_type = "application/proto"
+            wrap_message = protocol.bare_wrap_message
+            unwrap_message_stream = protocol.bare_unwrap_message_stream
+            connect = True
+        elif content_type == "application/json":
+            response_content_type = "application/json"
+            wrap_message = protocol.bare_wrap_message
+            unwrap_message_stream = protocol.bare_unwrap_message_stream
+            deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
+            serialize = protocol.serialize_json(rpc_method.response_serializer)
+            connect = True
         else:
             context.set_details(b"Unsupported content-type")
             context.set_code(grpc.StatusCode.UNKNOWN)
@@ -102,14 +137,17 @@ class grpcWSGI(grpc.Server):
         request_proto_iterator = None
 
         if environ.get("HTTP_GRPC_ENCODING", "identity") != "identity":
-            context.set_details(b"Unsupported encoding")
+            context.set_details("Unsupported encoding")
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        elif environ.get("HTTP_CONTENT_ENCODING", "identity") != "identity":
+            context.set_details("Unsupported encoding")
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         elif context.code == grpc.StatusCode.OK:
             decode_message = protocol.decode_identity
             stream = environ["wsgi.input"]
             request_proto_iterator = (
                 deserialize(decode_message(compressed, bytes(message)))
-                for _, compressed, message in protocol.unwrap_message_stream(stream)
+                for _, compressed, message in unwrap_message_stream(stream)
             )
 
         if not rpc_method.request_streaming and not rpc_method.response_streaming:
@@ -163,11 +201,6 @@ class grpcWSGI(grpc.Server):
             )
             headers.append(("Access-Control-Expose-Headers", "*"))
 
-        if response_content_type == "application/grpc-web-text":
-            wrap_message = protocol.b64_wrap_message
-        else:
-            wrap_message = protocol.wrap_message
-
         if rpc_method.response_streaming:
             yield from self._do_streaming_response(
                 rpc_method,
@@ -188,6 +221,8 @@ class grpcWSGI(grpc.Server):
                 context,
                 headers,
                 resp,
+                connect,
+                connect_stream,
             )
 
     def _do_streaming_response(
@@ -243,7 +278,15 @@ class grpcWSGI(grpc.Server):
         context,
         headers,
         resp,
+        connect,
+        connect_stream,
     ):
+        if context.code != grpc.StatusCode.OK and connect:
+            yield from self._do_connect_error(
+                start_response, context, headers, connect_stream, wrap_message
+            )
+            return
+
         if resp:
             message_data = wrap_message(False, False, serialize(resp))
         else:
@@ -263,7 +306,21 @@ class grpcWSGI(grpc.Server):
         trailer_message = protocol.pack_trailers(trailers)
         trailer_data = wrap_message(True, False, trailer_message)
 
-        content_length = len(message_data) + len(trailer_data)
+        if connect:
+            if connect_stream:
+                trailer_dict = {}
+                for name, value in trailers:
+                    trailer_dict.setdefault(name, []).append(value)
+                trailer_message = json.dumps({"metadata": trailer_dict}).encode()
+                trailer_data = protocol.wrap_message_connect(
+                    True, False, trailer_message
+                )
+            else:
+                headers.extend((f"trailer-{name}", value) for name, value in trailers)
+
+        content_length = len(message_data) + (
+            0 if (connect and not connect_stream) else len(trailer_data)
+        )
 
         headers.append(("content-length", str(content_length)))
 
@@ -278,7 +335,79 @@ class grpcWSGI(grpc.Server):
 
         yield message_data
 
-        yield trailer_data
+        if not connect or connect_stream:
+            yield trailer_data
+
+    def _do_connect_error(
+        self, start_response, context, headers, connect_stream, wrap_message
+    ):
+        if connect_stream:
+            status = "200 OK"
+        elif context.code == grpc.StatusCode.CANCELLED:
+            status = "499 Canceled"
+        else:
+            http_status = HTTPStatus(protocol.status_code_to_http(context.code))
+            status = f"{http_status.value} {http_status.phrase}"
+
+        code = context.code.name.lower()
+        if code == "cancelled":
+            code = "canceled"
+        error = {"code": code}
+        if context.details:
+            error["message"] = context.details
+
+        # headers =
+        if context._initial_metadata:
+            headers.extend(context._initial_metadata)
+
+        if not connect_stream and not context._started_response:
+            # set correct content-type for unary errors
+            headers = [
+                (name, value)
+                for name, value in headers
+                if name.lower() != "content-type"
+            ]
+            headers.append(("content-type", "application/json"))
+
+        trailers = {}
+        if context._trailing_metadata:
+            for name, value in context._trailing_metadata:
+                if name.lower() == "grpc-status-details-bin":
+                    # TODO: it's annoying to have to round trip this
+                    from google.rpc import status_pb2
+
+                    binvalue = protocol.b64decode(value)
+                    status_details = status_pb2.Status()
+                    status_details.ParseFromString(binvalue)
+                    error["details"] = [
+                        {
+                            "type": d.type_url.rpartition("/")[2],
+                            "value": protocol.b64encode(d.value),
+                        }
+                        for d in status_details.details
+                    ]
+                elif connect_stream:
+                    trailers.setdefault(name, []).append(value)
+                else:
+                    headers.append((name, value))
+
+        if context._started_response:
+            error_body = wrap_message(
+                True, False, json.dumps({"error": error, "metadata": trailers}).encode()
+            )
+            yield error_body
+        else:
+            if connect_stream:
+                error_body = wrap_message(
+                    True,
+                    False,
+                    json.dumps({"error": error, "metadata": trailers}).encode(),
+                )
+            else:
+                error_body = json.dumps(error).encode()
+
+            start_response(status, headers)
+            yield error_body
 
     def _do_cors_preflight(self, environ, start_response):
         headers = [
@@ -315,7 +444,7 @@ class grpcWSGI(grpc.Server):
             elif request_method == "OPTIONS":
                 return self._do_cors_preflight(environ, start_response)
             else:
-                start_response("400 Bad Request", [])
+                start_response("405 Method Not Allowed", [])
                 return []
 
         if self._application:
@@ -356,6 +485,7 @@ class ServicerContext(grpc.ServicerContext):
         self._invocation_metadata = metadata or tuple()
         self._initial_metadata = None
         self._trailing_metadata = None
+        self._started_response = False
 
     def set_code(self, code):
         if isinstance(code, grpc.StatusCode):

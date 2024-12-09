@@ -592,12 +592,12 @@ class ServicerContext(grpc.ServicerContext):
                 elif value == "application/proto":
                     response_content_type = "application/proto"
                     self._wrap_message = protocol.bare_wrap_message
-                    self._unwrap_message = protocol.bare_unwrap_message
+                    self._unwrap_message = protocol.bare_unwrap_message_asgi
                     self._connect = True
                 elif value == "application/json":
                     response_content_type = "application/json"
                     self._wrap_message = protocol.bare_wrap_message
-                    self._unwrap_message = protocol.bare_unwrap_message
+                    self._unwrap_message = protocol.bare_unwrap_message_asgi
                     self._make_serializer = protocol.serialize_json
                     self._make_deserializer = protocol.deserialize_json
                     self._connect = True
