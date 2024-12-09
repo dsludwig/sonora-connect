@@ -1,4 +1,3 @@
-import base64
 import functools
 import struct
 from urllib.parse import unquote
@@ -6,21 +5,8 @@ from urllib.parse import unquote
 import grpc
 from google.protobuf import json_format
 
-
-def b64encode(value):
-    # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
-    # Implementations MUST accept padded and un-padded values and should emit un-padded values.
-    return base64.b64encode(value).decode("ascii").rstrip("=")
-
-
-def b64decode(value):
-    # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
-    # Implementations MUST accept padded and un-padded values and should emit un-padded values.
-    _, padlength = divmod(len(value), 8)
-    padvalue = value + "=" * padlength
-    binvalue = base64.b64decode(padvalue)
-    return binvalue
-
+from sonora.encode import b64decode, b64encode
+from sonora.metadata import Metadata
 
 _HEADER_FORMAT = ">BI"
 _HEADER_LENGTH = struct.calcsize(_HEADER_FORMAT)
@@ -207,6 +193,8 @@ def unpack_trailers(message):
     for line in message.decode("ascii").splitlines():
         k, v = line.split(":", 1)
         v = v.strip()
+        if k.endswith("-bin"):
+            v = b64decode(v)
 
         trailers.append((k, v))
     return trailers
@@ -262,20 +250,44 @@ _STATUS_CODE_MAP = {
     grpc.StatusCode.DATA_LOSS: 500,
     grpc.StatusCode.UNAUTHENTICATED: 401,
 }
+_STATUS_CODE_HTTP_MAP = {
+    400: grpc.StatusCode.INTERNAL,
+    401: grpc.StatusCode.UNAUTHENTICATED,
+    403: grpc.StatusCode.PERMISSION_DENIED,
+    404: grpc.StatusCode.UNIMPLEMENTED,
+    429: grpc.StatusCode.UNAVAILABLE,
+    502: grpc.StatusCode.UNAVAILABLE,
+    503: grpc.StatusCode.UNAVAILABLE,
+    504: grpc.StatusCode.UNAVAILABLE,
+}
 
 
 def status_code_to_http(status_code):
     return _STATUS_CODE_MAP.get(status_code, 500)
 
 
+def http_status_to_status_code(status: int) -> grpc.StatusCode:
+    return _STATUS_CODE_HTTP_MAP.get(status, grpc.StatusCode.UNKNOWN)
+
+
 class WebRpcError(grpc.RpcError):
     _code_to_enum = {code.value[0]: code for code in grpc.StatusCode}  # type: ignore
 
-    def __init__(self, code, details, *args, **kwargs):
+    def __init__(
+        self,
+        code,
+        details,
+        *args,
+        initial_metadata=None,
+        trailing_metadata=None,
+        **kwargs,
+    ):
         super(WebRpcError, self).__init__(*args, **kwargs)
 
         self._code = code
         self._details = details
+        self._initial_metadata = initial_metadata or []
+        self._trailing_metadata = trailing_metadata or []
 
     @classmethod
     def from_metadata(cls, trailers):
@@ -284,12 +296,25 @@ class WebRpcError(grpc.RpcError):
 
         code = cls._code_to_enum[status]
 
-        return cls(code, details)
+        return cls(
+            code,
+            details,
+            trailing_metadata=trailers,
+        )
 
     def __str__(self):
         return "WebRpcError(status_code={}, details='{}')".format(
             self._code, self._details
         )
+
+    def http_status_code(self):
+        return 200
+
+    def initial_metadata(self):
+        return self._initial_metadata
+
+    def trailing_metadata(self):
+        return self._trailing_metadata
 
     def code(self):
         return self._code
@@ -300,11 +325,25 @@ class WebRpcError(grpc.RpcError):
 
 def raise_for_status(headers, trailers=None):
     if trailers:
-        metadata = dict(trailers)
+        # prioritize trailers over headers
+        metadata = Metadata(trailers)
+        metadata.extend(headers)
     else:
-        metadata = headers
+        metadata = Metadata(headers)
 
-    if "grpc-status" in metadata and metadata["grpc-status"] != "0":
+    if "content-type" not in metadata or metadata["content-type"] not in (
+        "application/grpc-web+proto",
+        "application/grpc-web",
+    ):
+        raise WebRpcError(
+            grpc.StatusCode.UNKNOWN,
+            "Invalid content-type",
+        )
+
+    if "grpc-status" not in metadata:
+        raise WebRpcError(grpc.StatusCode.INTERNAL, "Missing grpc-status header")
+
+    if metadata["grpc-status"] != "0":
         metadata = metadata.copy()
 
         if "grpc-message" in metadata:

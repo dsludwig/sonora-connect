@@ -1,5 +1,7 @@
 # Reference client has some incompatibilities
-Client Cancellation/HTTPVersion:2/Protocol:PROTOCOL_GRPC/**/unary/cancel-after-close-send
 gRPC Unexpected Responses/**/unary/ok-but-no-response
 gRPC Unexpected Responses/**/unexpected-compressed-message
 gRPC Unexpected Responses/**/unexpected-compression
+
+# Cancellation is not supported yet
+Client Cancellation/**/cancel-after-close-send

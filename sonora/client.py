@@ -2,26 +2,29 @@ import functools
 import inspect
 import io
 from urllib.parse import urljoin
-import warnings
 
 import grpc
 import urllib3
 import urllib3.exceptions
+from urllib3._collections import HTTPHeaderDict
 
 from sonora import protocol
 
 
-def insecure_web_channel(url):
-    return WebChannel(url)
+def insecure_web_channel(url, pool_manager_kws=None):
+    return WebChannel(url, pool_manager_kws=pool_manager_kws)
 
 
 class WebChannel:
-    def __init__(self, url):
+    def __init__(self, url, pool_manager_kws=None):
         if not url.startswith("http") and "://" not in url:
             url = f"http://{url}"
 
+        if pool_manager_kws is None:
+            pool_manager_kws = {}
+
         self._url = url
-        self._session = urllib3.PoolManager()
+        self._session = urllib3.PoolManager(**pool_manager_kws)
 
     def __enter__(self):
         return self
@@ -201,24 +204,46 @@ class UnaryUnaryCall(Call):
             "POST",
             self._url,
             body=protocol.wrap_message(False, False, self._serializer(self._request)),
-            headers=dict(self._metadata),
+            headers=HTTPHeaderDict(self._metadata),
             timeout=self._timeout,
         )
+
+        if self._response.status != 200 and "grpc-status" not in self._response.headers:
+            raise protocol.WebRpcError(
+                protocol.http_status_to_status_code(self._response.status),
+                self._response.reason,
+                initial_metadata=[
+                    (key, value) for key, value in self._response.headers.items()
+                ],
+            )
 
         buffer = io.BytesIO(self._response.data)
 
         messages = protocol.unwrap_message_stream(buffer)
+        result = None
 
         try:
-            trailers, _, message = next(messages)
+            trailers, compressed, message = next(messages)
         except StopIteration:
             protocol.raise_for_status(self._response.headers)
-            return
+            raise protocol.WebRpcError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "Missing response for unary call",
+            )
 
         if trailers:
             self._trailers = protocol.unpack_trailers(message)
+        elif compressed:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.INTERNAL, "Unexpected compression"
+            )
         else:
-            result = self._deserializer(message)
+            try:
+                result = self._deserializer(message)
+            except Exception:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.UNIMPLEMENTED, "Could not decode response"
+                )
 
         try:
             trailers, _, message = next(messages)
@@ -228,9 +253,18 @@ class UnaryUnaryCall(Call):
             if trailers:
                 self._trailers = protocol.unpack_trailers(message)
             else:
-                raise ValueError("UnaryUnary should only return a single message")
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "UnaryUnary should only return a single message",
+                )
 
         protocol.raise_for_status(self._response.headers, self._trailers)
+
+        if result is None:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "Missing response for unary call",
+            )
 
         return result
 

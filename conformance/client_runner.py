@@ -121,7 +121,6 @@ def handle_message(
         )
 
     logger.debug(f"** {msg.test_name} **")
-    # logger.debug(log_message(msg))
     any = msg.request_messages[0]
     logger.debug(f"{any.TypeName()=}")
 
@@ -154,6 +153,7 @@ def handle_message(
     ssl_context = None
     if msg.server_tls_cert:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ssl_context.check_hostname = False
         ssl_context.load_verify_locations(cadata=msg.server_tls_cert.decode("utf8"))
         proto = "https"
     else:
@@ -172,7 +172,9 @@ def handle_message(
             ),
         )
     elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
-        channel = sonora.client.insecure_web_channel(url)
+        channel = sonora.client.insecure_web_channel(
+            url, pool_manager_kws={"ssl_context": ssl_context}
+        )
     else:
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
@@ -221,21 +223,6 @@ def handle_message(
                     response_trailers=to_pb_headers(e.trailing_metadata()),
                 ),
             )
-        except sonora.protocol.WebRpcError as e:
-            # status = rpc_status.from_call(e)
-            return client_compat_pb2.ClientCompatResponse(
-                test_name=msg.test_name,
-                response=client_compat_pb2.ClientResponseResult(
-                    error=service_pb2.Error(
-                        code=getattr(config_pb2, f"CODE_{e.code().name.upper()}"),
-                        message=e.details(),
-                        # details=e.details(),
-                    ),
-                    http_status_code=e.http_status_code(),
-                    # response_headers=to_pb_headers(e.headers),
-                    # response_trailers=to_pb_headers(e.trailers),
-                ),
-            )
         except Exception as e:
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
@@ -263,11 +250,11 @@ def main():
             )
 
         with output_lock:
-            log_message(req, resp)
+            # log_message(req, resp)
             logger.info("Finishing request: %s", req.test_name)
             write_response(resp)
 
-    with concurrent.futures.ProcessPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor() as executor:
         while req := read_request():
             logger.info("Enqueuing request: %s", req.test_name)
             executor.submit(handle_message, req).add_done_callback(

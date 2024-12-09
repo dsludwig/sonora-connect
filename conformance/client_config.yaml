@@ -1,9 +1,9 @@
 features:
   versions:
-    # - HTTP_VERSION_1
+    - HTTP_VERSION_1
     - HTTP_VERSION_2
   protocols:
-    # - PROTOCOL_GRPC_WEB
+    - PROTOCOL_GRPC_WEB
     - PROTOCOL_GRPC
   codecs:
     - CODEC_PROTO
