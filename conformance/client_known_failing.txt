@@ -1,0 +1,2 @@
+# Cancellation is not supported yet
+Client Cancellation/**

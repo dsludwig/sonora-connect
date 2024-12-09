@@ -43,10 +43,14 @@ class WebChannel:
         )
 
     def stream_unary(self, path, request_serializer, response_deserializer):
-        return NotImplementedMulticallable()
+        return StreamUnaryMulticallable(
+            self._session, self._url, path, request_serializer, response_deserializer
+        )
 
     def stream_stream(self, path, request_serializer, response_deserializer):
-        return NotImplementedMulticallable()
+        return StreamStreamMulticallable(
+            self._session, self._url, path, request_serializer, response_deserializer
+        )
 
 
 class Multicallable:
@@ -67,17 +71,6 @@ class Multicallable:
 
     def future(self, request):
         raise NotImplementedError()
-
-
-class NotImplementedMulticallable(Multicallable):
-    def __init__(self):
-        pass
-
-    def __call__(self, request, timeout=None):
-        def nope(*args, **kwargs):
-            raise NotImplementedError()
-
-        return nope
 
 
 class UnaryUnaryMulticallable(Multicallable):
@@ -111,6 +104,45 @@ class UnaryStreamMulticallable(Multicallable):
 
         return UnaryStreamCall(
             request,
+            timeout,
+            call_metadata,
+            self._rpc_url,
+            self._session,
+            self._serializer,
+            self._deserializer,
+        )
+
+
+class StreamUnaryMulticallable(Multicallable):
+    def __call__(self, request_iterator, timeout=None, metadata=None):
+        resp, _call = self.with_call(request_iterator, timeout, metadata)
+        return resp
+
+    def with_call(self, request_iterator, timeout=None, metadata=None):
+        call_metadata = self._metadata.copy()
+        if metadata is not None:
+            call_metadata.extend(protocol.encode_headers(metadata))
+
+        call = StreamUnaryCall(
+            request_iterator,
+            timeout,
+            call_metadata,
+            self._rpc_url,
+            self._session,
+            self._serializer,
+            self._deserializer,
+        )
+        return call(), call
+
+
+class StreamStreamMulticallable(Multicallable):
+    def __call__(self, request_iterator, timeout=None, metadata=None):
+        call_metadata = self._metadata.copy()
+        if metadata is not None:
+            call_metadata.extend(protocol.encode_headers(metadata))
+
+        return StreamStreamCall(
+            request_iterator,
             timeout,
             call_metadata,
             self._rpc_url,
@@ -279,6 +311,121 @@ class UnaryStreamCall(Call):
             headers=HTTPHeaderDict(self._metadata),
             timeout=self._timeout,
             preload_content=False,
+        )
+        self._response.auto_close = False
+
+        stream = io.BufferedReader(self._response, buffer_size=16384)
+
+        for trailers, _, message in protocol.unwrap_message_stream(stream):
+            if trailers:
+                self._trailers = protocol.unpack_trailers(message)
+                break
+            else:
+                yield self._deserializer(message)
+
+        self._response.release_conn()
+
+        protocol.raise_for_status(self._response.headers, self._trailers)
+
+    def __del__(self):
+        if self._response and self._response.connection:
+            self._response.close()
+
+
+class StreamUnaryCall(Call):
+    @Call._raise_timeout(urllib3.exceptions.TimeoutError)
+    def __call__(self):
+        self._response = self._session.request(
+            "POST",
+            self._url,
+            body=(
+                protocol.wrap_message(False, False, self._serializer(req))
+                for req in self._request
+            ),
+            headers=HTTPHeaderDict(self._metadata),
+            timeout=self._timeout,
+            chunked=True,
+        )
+
+        if self._response.status != 200 and "grpc-status" not in self._response.headers:
+            raise protocol.WebRpcError(
+                protocol.http_status_to_status_code(self._response.status),
+                self._response.reason,
+                initial_metadata=[
+                    (key, value) for key, value in self._response.headers.items()
+                ],
+            )
+
+        buffer = io.BytesIO(self._response.data)
+
+        messages = protocol.unwrap_message_stream(buffer)
+        result = None
+
+        try:
+            trailers, compressed, message = next(messages)
+        except StopIteration:
+            protocol.raise_for_status(self._response.headers)
+            raise protocol.WebRpcError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "Missing response for unary call",
+            )
+
+        if trailers:
+            self._trailers = protocol.unpack_trailers(message)
+        elif compressed:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.INTERNAL, "Unexpected compression"
+            )
+        else:
+            try:
+                result = self._deserializer(message)
+            except Exception:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.UNIMPLEMENTED, "Could not decode response"
+                )
+
+        try:
+            trailers, _, message = next(messages)
+        except StopIteration:
+            pass
+        else:
+            if trailers:
+                self._trailers = protocol.unpack_trailers(message)
+            else:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "UnaryUnary should only return a single message",
+                )
+
+        protocol.raise_for_status(self._response.headers, self._trailers)
+
+        if result is None:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "Missing response for unary call",
+            )
+
+        return result
+
+    def __del__(self):
+        if self._response and self._response.connection:
+            self._response.close()
+
+
+class StreamStreamCall(Call):
+    @Call._raise_timeout(urllib3.exceptions.TimeoutError)
+    def __iter__(self):
+        self._response = self._session.request(
+            "POST",
+            self._url,
+            body=(
+                protocol.wrap_message(False, False, self._serializer(req))
+                for req in self._request
+            ),
+            headers=HTTPHeaderDict(self._metadata),
+            timeout=self._timeout,
+            preload_content=False,
+            chunked=True,
         )
         self._response.auto_close = False
 
