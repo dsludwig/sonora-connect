@@ -89,5 +89,8 @@ class Metadata(abc.Mapping):
     def copy(self):
         return self.__class__(self)
 
+    def __repr__(self) -> str:
+        return f"Metadata({self._state!r})"
+
 
 __all__ = ["Metadata"]

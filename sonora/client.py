@@ -276,7 +276,7 @@ class UnaryStreamCall(Call):
             "POST",
             self._url,
             body=protocol.wrap_message(False, False, self._serializer(self._request)),
-            headers=dict(self._metadata),
+            headers=HTTPHeaderDict(self._metadata),
             timeout=self._timeout,
             preload_content=False,
         )

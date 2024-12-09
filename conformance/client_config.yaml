@@ -1,10 +1,10 @@
 features:
   versions:
     - HTTP_VERSION_1
-    - HTTP_VERSION_2
+    # - HTTP_VERSION_2
   protocols:
     - PROTOCOL_GRPC_WEB
-    - PROTOCOL_GRPC
+    # - PROTOCOL_GRPC
   codecs:
     - CODEC_PROTO
     # - CODEC_JSON
@@ -13,7 +13,7 @@ features:
   stream_types:
     - STREAM_TYPE_UNARY
     # - STREAM_TYPE_CLIENT_STREAM
-    # - STREAM_TYPE_SERVER_STREAM
+    - STREAM_TYPE_SERVER_STREAM
     # - STREAM_TYPE_HALF_DUPLEX_BIDI_STREAM
     # - STREAM_TYPE_FULL_DUPLEX_BIDI_STREAM
 

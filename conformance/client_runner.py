@@ -96,7 +96,10 @@ def to_pb_headers(headers: List[Tuple[str, str]]) -> list[service_pb2.Header]:
 def handle_message(
     msg: client_compat_pb2.ClientCompatRequest,
 ) -> client_compat_pb2.ClientCompatResponse:
-    if msg.stream_type != config_pb2.STREAM_TYPE_UNARY:
+    if msg.stream_type not in (
+        config_pb2.STREAM_TYPE_UNARY,
+        config_pb2.STREAM_TYPE_SERVER_STREAM,
+    ):
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
             error=client_compat_pb2.ClientErrorResult(
@@ -127,6 +130,7 @@ def handle_message(
     req_types = {
         "connectrpc.conformance.v1.UnaryRequest": service_pb2.UnaryRequest,
         "connectrpc.conformance.v1.UnimplementedRequest": service_pb2.UnimplementedRequest,
+        "connectrpc.conformance.v1.ServerStreamRequest": service_pb2.ServerStreamRequest,
     }
 
     try:
@@ -184,32 +188,62 @@ def handle_message(
         )
 
     with channel:
+        payloads = []
         try:
             client = service_pb2_grpc.ConformanceServiceStub(channel)
-            resp, call = getattr(client, msg.method).with_call(
-                req,
-                timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
-                metadata=[
-                    (h.name.lower(), value)
-                    for h in msg.request_headers
-                    for value in h.value
-                ],
-            )
+            if msg.stream_type == config_pb2.STREAM_TYPE_UNARY:
+                resp, call = getattr(client, msg.method).with_call(
+                    req,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+                payloads.append(resp.payload)
 
-            return client_compat_pb2.ClientCompatResponse(
-                test_name=msg.test_name,
-                response=client_compat_pb2.ClientResponseResult(
-                    payloads=[resp.payload],
-                    http_status_code=200,
-                    response_headers=to_pb_headers(call.initial_metadata()),
-                    response_trailers=to_pb_headers(call.trailing_metadata()),
-                ),
-            )
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(call.initial_metadata()),
+                        response_trailers=to_pb_headers(call.trailing_metadata()),
+                    ),
+                )
+            elif msg.stream_type == config_pb2.STREAM_TYPE_SERVER_STREAM:
+                call = getattr(client, msg.method)(
+                    req,
+                    timeout=msg.timeout_ms / 1000 if msg.timeout_ms else None,
+                    metadata=[
+                        (h.name.lower(), value)
+                        for h in msg.request_headers
+                        for value in h.value
+                    ],
+                )
+                for resp in call:
+                    payloads.append(resp.payload)
+
+                return client_compat_pb2.ClientCompatResponse(
+                    test_name=msg.test_name,
+                    response=client_compat_pb2.ClientResponseResult(
+                        payloads=payloads,
+                        http_status_code=200,
+                        response_headers=to_pb_headers(call.initial_metadata()),
+                        response_trailers=to_pb_headers(call.trailing_metadata()),
+                    ),
+                )
+
         except grpc.RpcError as e:
             status = rpc_status.from_call(e)
+            if status is None:
+                logger.debug("headers: %r", e.initial_metadata())
+                logger.debug("trailers: %r", e.trailing_metadata())
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
                 response=client_compat_pb2.ClientResponseResult(
+                    payloads=payloads,
                     error=service_pb2.Error(
                         code=getattr(
                             config_pb2,

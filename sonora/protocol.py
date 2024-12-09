@@ -349,7 +349,16 @@ def raise_for_status(headers, trailers=None):
         if "grpc-message" in metadata:
             metadata["grpc-message"] = unquote(metadata["grpc-message"])
 
-        raise WebRpcError.from_metadata(metadata)
+        status = int(metadata["grpc-status"])
+        details = metadata.get("grpc-message")
+        code = WebRpcError._code_to_enum[status]
+
+        raise WebRpcError(
+            code,
+            details,
+            initial_metadata=Metadata(headers) if trailers else None,
+            trailing_metadata=Metadata(trailers) if trailers else Metadata(headers),
+        )
 
 
 _timeout_units = {
