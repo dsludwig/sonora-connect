@@ -345,7 +345,7 @@ def raise_for_status(headers, trailers=None):
     else:
         metadata = Metadata(headers)
 
-    if "content-type" not in metadata or metadata["content-type"] not in (
+    if "content-type" in metadata and metadata["content-type"] not in (
         "application/grpc-web+proto",
         "application/grpc-web",
     ):
@@ -354,10 +354,10 @@ def raise_for_status(headers, trailers=None):
             "Invalid content-type",
         )
 
-    if "grpc-status" not in metadata:
+    if headers is not None and trailers is not None and "grpc-status" not in metadata:
         raise WebRpcError(grpc.StatusCode.INTERNAL, "Missing grpc-status header")
 
-    if metadata["grpc-status"] != "0":
+    if "grpc-status" in metadata and metadata["grpc-status"] != "0":
         metadata = metadata.copy()
 
         if "grpc-message" in metadata:
