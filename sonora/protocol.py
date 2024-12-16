@@ -258,6 +258,8 @@ def unpack_error_connect(
     code = error.get("code")
     if code is not None and code in _STATUS_CODE_NAME_MAP:
         status_code = named_status_to_code(error.get("code"))
+    if status_code is None:
+        status_code = grpc.StatusCode.UNKNOWN
 
     status = status_pb2.Status(
         code=status_code.value[0],

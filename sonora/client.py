@@ -490,12 +490,21 @@ class UnaryStreamCall(Call):
 
         stream = io.BufferedReader(self._response, buffer_size=16384)
 
-        for trailers, _, message in self._unwrap_message_stream(stream):
+        for trailers, compressed, message in self._unwrap_message_stream(stream):
+            if compressed:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.INTERNAL, "Unexpected compression"
+                )
             if trailers:
                 self._trailers = self._unpack_trailers(message, self.initial_metadata())
                 break
             else:
-                yield self._deserializer(message)
+                try:
+                    yield self._deserializer(message)
+                except Exception:
+                    raise protocol.WebRpcError(
+                        grpc.StatusCode.INTERNAL, "Could not decode response"
+                    )
 
         self._response.release_conn()
 
