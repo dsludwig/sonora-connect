@@ -76,7 +76,7 @@ def log_message(request: Any, response: Any):
 
 def to_pb_headers(headers: List[Tuple[str, str]]) -> list[service_pb2.Header]:
     h_dict: dict[str, list[str]] = collections.defaultdict(list)
-    for key, value in headers:
+    for key, value in headers or []:
         if key.endswith("-bin") and isinstance(value, bytes):
             h_dict[key].append(base64.b64encode(value))
         else:
@@ -162,11 +162,15 @@ def handle_message(
         channel = sonora.client.insecure_web_channel(
             url, pool_manager_kws={"ssl_context": ssl_context}
         )
+    elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
+        channel = sonora.client.insecure_connect_channel(
+            url, pool_manager_kws={"ssl_context": ssl_context}
+        )
     else:
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
             error=client_compat_pb2.ClientErrorResult(
-                message=f"TODO unknown message type: {any.TypeName()}"
+                message=f"TODO unknown message type: {msg.protocol}"
             ),
         )
 
@@ -345,11 +349,16 @@ async def handle_message_async(
         channel = sonora.aio.insecure_web_channel(
             url, session_kws={"connector": connector}
         )
+    elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        channel = sonora.aio.insecure_connect_channel(
+            url, session_kws={"connector": connector}
+        )
     else:
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
             error=client_compat_pb2.ClientErrorResult(
-                message=f"TODO unknown message type: {any.TypeName()}"
+                message=f"TODO unknown message type: {msg.protocol}"
             ),
         )
 
@@ -455,6 +464,8 @@ async def handle_message_async(
 
         except grpc.RpcError as e:
             status = rpc_status.from_call(e)
+            logger.info("initial_meta: %r", e.initial_metadata())
+            logger.info("trailing_meta: %r", e.trailing_metadata())
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
                 response=client_compat_pb2.ClientResponseResult(

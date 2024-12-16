@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 
 import aiohttp
 import grpc.experimental.aio
@@ -12,8 +13,12 @@ def insecure_web_channel(url, session_kws=None):
     return WebChannel(url, session_kws)
 
 
+def insecure_connect_channel(url, session_kws=None):
+    return WebChannel(url, session_kws, connect=True)
+
+
 class WebChannel:
-    def __init__(self, url, session_kws=None):
+    def __init__(self, url, session_kws=None, connect=False):
         if not url.startswith("http") and "://" not in url:
             url = f"http://{url}"
 
@@ -22,6 +27,7 @@ class WebChannel:
             session_kws = {}
 
         self._session = aiohttp.ClientSession(**session_kws)
+        self._connect = connect
 
     async def __aenter__(self):
         return self
@@ -34,26 +40,61 @@ class WebChannel:
 
     def unary_unary(self, path, request_serializer, response_deserializer):
         return UnaryUnaryMulticallable(
-            self._session, self._url, path, request_serializer, response_deserializer
+            self._session,
+            self._url,
+            path,
+            request_serializer,
+            response_deserializer,
+            self._connect,
         )
 
     def unary_stream(self, path, request_serializer, response_deserializer):
         return UnaryStreamMulticallable(
-            self._session, self._url, path, request_serializer, response_deserializer
+            self._session,
+            self._url,
+            path,
+            request_serializer,
+            response_deserializer,
+            self._connect,
         )
 
     def stream_unary(self, path, request_serializer, response_deserializer):
         return StreamUnaryMulticallable(
-            self._session, self._url, path, request_serializer, response_deserializer
+            self._session,
+            self._url,
+            path,
+            request_serializer,
+            response_deserializer,
+            self._connect,
         )
 
     def stream_stream(self, path, request_serializer, response_deserializer):
         return StreamStreamMulticallable(
-            self._session, self._url, path, request_serializer, response_deserializer
+            self._session,
+            self._url,
+            path,
+            request_serializer,
+            response_deserializer,
+            self._connect,
         )
 
 
 class UnaryUnaryMulticallable(sonora.client.Multicallable):
+    def __init__(
+        self, session, url, path, request_serializer, request_deserializer, connect
+    ):
+        super().__init__(
+            session, url, path, request_serializer, request_deserializer, connect
+        )
+        if self._connect:
+            self._wrap_message = protocol.bare_wrap_message
+            self._unwrap_message_stream = protocol.bare_unwrap_message_stream
+            self._metadata = [
+                ("x-user-agent", "grpc-web-python/0.1"),
+                ("content-type", "application/proto"),
+            ]
+            self._expected_content_types = ["application/proto"]
+
     def __call__(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
@@ -67,6 +108,12 @@ class UnaryUnaryMulticallable(sonora.client.Multicallable):
             self._session,
             self._serializer,
             self._deserializer,
+            self._wrap_message,
+            self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
+            self._connect,
+            self._expected_content_types,
         )
 
 
@@ -84,6 +131,12 @@ class UnaryStreamMulticallable(sonora.client.Multicallable):
             self._session,
             self._serializer,
             self._deserializer,
+            self._wrap_message,
+            self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
+            self._connect,
+            self._expected_content_types,
         )
 
 
@@ -101,6 +154,12 @@ class StreamUnaryMulticallable(sonora.client.Multicallable):
             self._session,
             self._serializer,
             self._deserializer,
+            self._wrap_message,
+            self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
+            self._connect,
+            self._expected_content_types,
         )
 
 
@@ -118,6 +177,12 @@ class StreamStreamMulticallable(sonora.client.Multicallable):
             self._session,
             self._serializer,
             self._deserializer,
+            self._wrap_message,
+            self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
+            self._connect,
+            self._expected_content_types,
         )
 
 
@@ -139,9 +204,7 @@ class Call(sonora.client.Call):
 
             self._response = await self._session.post(
                 self._url,
-                data=protocol.wrap_message(
-                    False, False, self._serializer(self._request)
-                ),
+                data=self._wrap_message(False, False, self._serializer(self._request)),
                 headers=self._metadata,
                 timeout=timeout,
             )
@@ -169,6 +232,22 @@ class UnaryUnaryCall(Call):
         response.release()
 
         if self._response.status != 200 and "grpc-status" not in self._response.headers:
+            if self._connect:
+                initial_metadata, trailing_metadata = protocol.split_trailers(
+                    protocol.Metadata(self._response.headers.items())
+                )
+                try:
+                    data = json.loads(data)
+                    protocol.unpack_error_connect(
+                        data,
+                        initial_metadata,
+                        trailing_metadata,
+                        status_code=protocol.http_status_to_status_code(
+                            self._response.status
+                        ),
+                    )
+                except ValueError:
+                    pass
             raise protocol.WebRpcError(
                 protocol.http_status_to_status_code(self._response.status),
                 self._response.reason,
@@ -178,24 +257,28 @@ class UnaryUnaryCall(Call):
             )
 
         if not data:
-            protocol.raise_for_status(response.headers)
+            self._raise_for_status(
+                response.headers, expected_content_types=self._expected_content_types
+            )
 
         buffer = io.BytesIO(data)
 
-        messages = protocol.unwrap_message_stream(buffer)
+        messages = self._unwrap_message_stream(buffer)
         result = None
 
         try:
             trailers, compressed, message = next(messages)
         except StopIteration:
-            protocol.raise_for_status(self._response.headers, {})
+            self._raise_for_status(
+                self._response.headers, {}, self._expected_content_types
+            )
             raise protocol.WebRpcError(
                 grpc.StatusCode.UNIMPLEMENTED,
                 "Missing response for unary call",
             )
 
         if trailers:
-            self._trailers = protocol.unpack_trailers(message)
+            self._trailers = self._unpack_trailers(message, response.headers)
         elif compressed:
             raise protocol.WebRpcError(
                 grpc.StatusCode.INTERNAL, "Unexpected compression"
@@ -205,7 +288,7 @@ class UnaryUnaryCall(Call):
                 result = self._deserializer(message)
             except Exception:
                 raise protocol.WebRpcError(
-                    grpc.StatusCode.UNIMPLEMENTED, "Could not decode response"
+                    grpc.StatusCode.INTERNAL, "Could not decode response"
                 )
 
         try:
@@ -214,40 +297,91 @@ class UnaryUnaryCall(Call):
             pass
         else:
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, response.headers)
             else:
                 raise protocol.WebRpcError(
                     grpc.StatusCode.UNIMPLEMENTED,
-                    "UnaryUnary should only return a single message",
+                    "StreamUnary should only return a single message",
                 )
 
-        protocol.raise_for_status(response.headers, self._trailers)
+        self._raise_for_status(
+            response.headers, self._trailers, self._expected_content_types
+        )
         if result is None:
             raise protocol.WebRpcError(
                 grpc.StatusCode.UNIMPLEMENTED,
                 "Missing response for unary call",
             )
 
+        if self._connect:
+            _, self._trailers = protocol.split_trailers(
+                protocol.Metadata(self._response.headers.items())
+            )
+
         return result
 
 
 class UnaryStreamCall(Call):
+    def __init__(
+        self,
+        request,
+        timeout,
+        metadata,
+        url,
+        session,
+        serializer,
+        deserializer,
+        wrap_message,
+        unwrap_message_stream,
+        unpack_trailers,
+        raise_for_status,
+        connect,
+        expected_content_types,
+    ):
+        super().__init__(
+            request,
+            timeout,
+            metadata,
+            url,
+            session,
+            serializer,
+            deserializer,
+            wrap_message,
+            unwrap_message_stream,
+            unpack_trailers,
+            raise_for_status,
+            connect,
+            expected_content_types,
+        )
+        if connect:
+            self._unwrap_message_stream_async = (
+                protocol.unwrap_message_stream_async_connect
+            )
+        else:
+            self._unwrap_message_stream_async = protocol.unwrap_message_stream_async
+
     @Call._raise_timeout(asyncio.TimeoutError)
     async def read(self):
         response = await self._get_response()
 
-        async for trailers, _, message in protocol.unwrap_message_stream_async(
+        async for trailers, compressed, message in self._unwrap_message_stream_async(
             response.content
         ):
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, response.headers)
                 break
+            elif compressed:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.INTERNAL, "Unexpected compression"
+                )
             else:
                 return self._deserializer(message)
 
         response.release()
 
-        protocol.raise_for_status(response.headers, self._trailers)
+        self._raise_for_status(
+            response.headers, self._trailers, self._expected_content_types
+        )
 
         return grpc.experimental.aio.EOF
 
@@ -255,18 +389,29 @@ class UnaryStreamCall(Call):
     async def __aiter__(self):
         response = await self._get_response()
 
-        async for trailers, _, message in protocol.unwrap_message_stream_async(
+        async for trailers, compressed, message in self._unwrap_message_stream_async(
             response.content
         ):
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, response.headers)
                 break
+            elif compressed:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.INTERNAL, "Unexpected compression"
+                )
             else:
-                yield self._deserializer(message)
+                try:
+                    yield self._deserializer(message)
+                except Exception:
+                    raise protocol.WebRpcError(
+                        grpc.StatusCode.INTERNAL, "Could not decode response"
+                    )
 
         response.release()
 
-        protocol.raise_for_status(response.headers, self._trailers)
+        self._raise_for_status(
+            response.headers, self._trailers, self._expected_content_types
+        )
 
 
 class StreamingRequestCall(Call):
@@ -311,24 +456,28 @@ class StreamUnaryCall(StreamingRequestCall):
             )
 
         if not data:
-            protocol.raise_for_status(response.headers)
+            self._raise_for_status(
+                response.headers, expected_content_types=self._expected_content_types
+            )
 
         buffer = io.BytesIO(data)
 
-        messages = protocol.unwrap_message_stream(buffer)
+        messages = self._unwrap_message_stream(buffer)
         result = None
 
         try:
             trailers, compressed, message = next(messages)
         except StopIteration:
-            protocol.raise_for_status(self._response.headers, {})
+            self._raise_for_status(
+                self._response.headers, {}, self._expected_content_types
+            )
             raise protocol.WebRpcError(
                 grpc.StatusCode.UNIMPLEMENTED,
                 "Missing response for unary call",
             )
 
         if trailers:
-            self._trailers = protocol.unpack_trailers(message)
+            self._trailers = self._unpack_trailers(message, response.headers)
         elif compressed:
             raise protocol.WebRpcError(
                 grpc.StatusCode.INTERNAL, "Unexpected compression"
@@ -338,7 +487,7 @@ class StreamUnaryCall(StreamingRequestCall):
                 result = self._deserializer(message)
             except Exception:
                 raise protocol.WebRpcError(
-                    grpc.StatusCode.UNIMPLEMENTED, "Could not decode response"
+                    grpc.StatusCode.INTERNAL, "Could not decode response"
                 )
 
         try:
@@ -347,14 +496,16 @@ class StreamUnaryCall(StreamingRequestCall):
             pass
         else:
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, response.headers)
             else:
                 raise protocol.WebRpcError(
                     grpc.StatusCode.UNIMPLEMENTED,
                     "UnaryUnary should only return a single message",
                 )
 
-        protocol.raise_for_status(response.headers, self._trailers)
+        self._raise_for_status(
+            response.headers, self._trailers, self._expected_content_types
+        )
         if result is None:
             raise protocol.WebRpcError(
                 grpc.StatusCode.UNIMPLEMENTED,
@@ -365,22 +516,71 @@ class StreamUnaryCall(StreamingRequestCall):
 
 
 class StreamStreamCall(StreamingRequestCall):
+    def __init__(
+        self,
+        request,
+        timeout,
+        metadata,
+        url,
+        session,
+        serializer,
+        deserializer,
+        wrap_message,
+        unwrap_message_stream,
+        unpack_trailers,
+        raise_for_status,
+        connect,
+        expected_content_types,
+    ):
+        super().__init__(
+            request,
+            timeout,
+            metadata,
+            url,
+            session,
+            serializer,
+            deserializer,
+            wrap_message,
+            unwrap_message_stream,
+            unpack_trailers,
+            raise_for_status,
+            connect,
+            expected_content_types,
+        )
+        if connect:
+            self._unwrap_message_stream_async = (
+                protocol.unwrap_message_stream_async_connect
+            )
+        else:
+            self._unwrap_message_stream_async = protocol.unwrap_message_stream_async
+
     @Call._raise_timeout(asyncio.TimeoutError)
     async def read(self):
         response = await self._get_response()
 
-        async for trailers, _, message in protocol.unwrap_message_stream_async(
+        async for trailers, compressed, message in self._unwrap_message_stream_async(
             response.content
         ):
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, response.headers)
                 break
+            elif compressed:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.INTERNAL, "Unexpected compression"
+                )
             else:
-                return self._deserializer(message)
+                try:
+                    return self._deserializer(message)
+                except Exception:
+                    raise protocol.WebRpcError(
+                        grpc.StatusCode.INTERNAL, "Could not decode response"
+                    )
 
         response.release()
 
-        protocol.raise_for_status(response.headers, self._trailers)
+        self._raise_for_status(
+            response.headers, self._trailers, self._expected_content_types
+        )
 
         return grpc.experimental.aio.EOF
 
@@ -388,15 +588,26 @@ class StreamStreamCall(StreamingRequestCall):
     async def __aiter__(self):
         response = await self._get_response()
 
-        async for trailers, _, message in protocol.unwrap_message_stream_async(
+        async for trailers, compressed, message in self._unwrap_message_stream_async(
             response.content
         ):
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, response.headers)
                 break
+            elif compressed:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.INTERNAL, "Unexpected compression"
+                )
             else:
-                yield self._deserializer(message)
+                try:
+                    yield self._deserializer(message)
+                except Exception:
+                    raise protocol.WebRpcError(
+                        grpc.StatusCode.INTERNAL, "Could not decode response"
+                    )
 
         response.release()
 
-        protocol.raise_for_status(response.headers, self._trailers)
+        self._raise_for_status(
+            response.headers, self._trailers, self._expected_content_types
+        )

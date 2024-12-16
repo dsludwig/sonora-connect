@@ -1,9 +1,12 @@
 import functools
+import json
 import struct
 from urllib.parse import unquote
 
 import grpc
-from google.protobuf import json_format
+from google.protobuf import any_pb2, json_format
+from google.rpc import status_pb2
+from grpc_status import rpc_status
 
 from sonora.encode import b64decode, b64encode
 from sonora.metadata import Metadata
@@ -158,6 +161,10 @@ unwrap_message_asgi_connect = functools.partial(
 unwrap_message_stream_connect = functools.partial(
     unwrap_message_stream, unpack_header_flags=_unpack_header_flags_connect
 )
+unwrap_message_stream_async_connect = functools.partial(
+    unwrap_message_stream_async,
+    unpack_header_flags=_unpack_header_flags_connect,
+)
 
 
 async def bare_unwrap_message_asgi(receive):
@@ -202,7 +209,7 @@ def pack_trailers(trailers):
     return bytes(data)
 
 
-def unpack_trailers(message):
+def unpack_trailers(message, _initial_metadata=None):
     trailers = []
     for line in message.decode("ascii").splitlines():
         k, v = line.split(":", 1)
@@ -226,6 +233,73 @@ def encode_headers(metadata):
             header = header.decode("ascii")
 
         yield header, value
+
+
+def split_trailers(metadata):
+    initial_metadata = Metadata()
+    trailing_metadata = Metadata()
+    for header, value in metadata:
+        if header.startswith("trailer-"):
+            _, _, header = header.partition("trailer-")
+            trailing_metadata.add(header, value)
+        else:
+            initial_metadata.add(header, value)
+    return initial_metadata, trailing_metadata
+
+
+def unpack_error_connect(
+    error: dict | None,
+    initial_metadata: Metadata,
+    trailing_metadata: Metadata,
+    status_code: grpc.StatusCode | None = None,
+):
+    if error is None:
+        return
+        # raise WebRpcError(
+        #     code=grpc.StatusCode.INTERNAL,
+        #     details="Invalid error message",
+        # )
+    code = error.get("code")
+    if code is not None and code in _STATUS_CODE_NAME_MAP:
+        status_code = named_status_to_code(error.get("code"))
+    if status_code is None:
+        status_code = grpc.StatusCode.UNKNOWN
+
+    status = status_pb2.Status(
+        code=status_code.value[0],
+        message=error.get("message"),
+    )
+    if "details" in error:
+        for detail in error["details"]:
+            any = any_pb2.Any(
+                type_url=f'type.googleapis.com/{detail["type"]}',
+                value=b64decode(detail["value"]),
+            )
+            status.details.append(any)
+
+    code, message, status_trailing_metadata = rpc_status.to_status(status)
+    if trailing_metadata is None:
+        trailing_metadata = status_trailing_metadata
+    else:
+        trailing_metadata.extend(status_trailing_metadata)
+    raise WebRpcError(
+        code=code,
+        details=message,
+        initial_metadata=Metadata(initial_metadata),
+        trailing_metadata=trailing_metadata,
+    )
+
+
+def unpack_trailers_connect(response, initial_metadata):
+    response = json.loads(response)
+    trailing_metadata = None
+    if "metadata" in response:
+        trailing_metadata = Metadata(response["metadata"])
+    if "error" in response:
+        error = response["error"]
+        unpack_error_connect(error, initial_metadata, trailing_metadata)
+
+    return trailing_metadata
 
 
 def deserialize_json(request_deserializer):
@@ -274,6 +348,11 @@ _STATUS_CODE_HTTP_MAP = {
     503: grpc.StatusCode.UNAVAILABLE,
     504: grpc.StatusCode.UNAVAILABLE,
 }
+_STATUS_CODE_NAME_MAP = {
+    status_code.name.lower(): status_code for status_code in grpc.StatusCode
+}
+# ConnectRPC uses a different name.
+_STATUS_CODE_NAME_MAP["canceled"] = grpc.StatusCode.CANCELLED
 
 
 def status_code_to_http(status_code):
@@ -282,6 +361,10 @@ def status_code_to_http(status_code):
 
 def http_status_to_status_code(status: int) -> grpc.StatusCode:
     return _STATUS_CODE_HTTP_MAP.get(status, grpc.StatusCode.UNKNOWN)
+
+
+def named_status_to_code(name: str) -> grpc.StatusCode:
+    return _STATUS_CODE_NAME_MAP.get(name, grpc.StatusCode.UNKNOWN)
 
 
 class WebRpcError(grpc.RpcError):
@@ -337,7 +420,7 @@ class WebRpcError(grpc.RpcError):
         return self._details
 
 
-def raise_for_status(headers, trailers=None):
+def raise_for_status(headers, trailers=None, expected_content_types=[]):
     if trailers:
         # prioritize trailers over headers
         metadata = Metadata(trailers)
@@ -345,9 +428,9 @@ def raise_for_status(headers, trailers=None):
     else:
         metadata = Metadata(headers)
 
-    if "content-type" in metadata and metadata["content-type"] not in (
-        "application/grpc-web+proto",
-        "application/grpc-web",
+    if (
+        "content-type" in metadata
+        and metadata["content-type"] not in expected_content_types
     ):
         raise WebRpcError(
             grpc.StatusCode.UNKNOWN,
@@ -372,6 +455,24 @@ def raise_for_status(headers, trailers=None):
             details,
             initial_metadata=Metadata(headers) if trailers else None,
             trailing_metadata=Metadata(trailers) if trailers else Metadata(headers),
+        )
+
+
+def raise_for_status_connect(headers, trailers=None, expected_content_types=[]):
+    if trailers:
+        # prioritize trailers over headers
+        metadata = Metadata(trailers)
+        metadata.extend(headers)
+    else:
+        metadata = Metadata(headers)
+
+    if (
+        "content-type" in metadata
+        and metadata["content-type"] not in expected_content_types
+    ):
+        raise WebRpcError(
+            grpc.StatusCode.UNKNOWN,
+            "Invalid content-type",
         )
 
 

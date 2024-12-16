@@ -29,9 +29,10 @@ class Metadata(abc.Mapping):
 
     _state: dict[MetadataKey, list[MetadataValue]]
 
-    def __init__(self, headers: MetadataDict | MetadataList) -> None:
+    def __init__(self, headers: MetadataDict | MetadataList | None = None) -> None:
         self._state = {}
-        self.extend(headers)
+        if headers is not None:
+            self.extend(headers)
 
     def _normalize(self, key: MetadataKey) -> MetadataKey:
         return key.lower()
