@@ -349,6 +349,11 @@ async def handle_message_async(
         channel = sonora.aio.insecure_web_channel(
             url, session_kws={"connector": connector}
         )
+    elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        channel = sonora.aio.insecure_connect_channel(
+            url, session_kws={"connector": connector}
+        )
     else:
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
@@ -459,6 +464,8 @@ async def handle_message_async(
 
         except grpc.RpcError as e:
             status = rpc_status.from_call(e)
+            logger.info("initial_meta: %r", e.initial_metadata())
+            logger.info("trailing_meta: %r", e.trailing_metadata())
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
                 response=client_compat_pb2.ClientResponseResult(

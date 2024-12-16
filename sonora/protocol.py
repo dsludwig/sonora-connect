@@ -161,6 +161,10 @@ unwrap_message_asgi_connect = functools.partial(
 unwrap_message_stream_connect = functools.partial(
     unwrap_message_stream, unpack_header_flags=_unpack_header_flags_connect
 )
+unwrap_message_stream_async_connect = functools.partial(
+    unwrap_message_stream_async,
+    unpack_header_flags=_unpack_header_flags_connect,
+)
 
 
 async def bare_unwrap_message_asgi(receive):
@@ -281,7 +285,7 @@ def unpack_error_connect(
     raise WebRpcError(
         code=code,
         details=message,
-        initial_metadata=initial_metadata,
+        initial_metadata=Metadata(initial_metadata),
         trailing_metadata=trailing_metadata,
     )
 

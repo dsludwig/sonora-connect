@@ -588,7 +588,7 @@ class StreamUnaryCall(Call):
             else:
                 raise protocol.WebRpcError(
                     grpc.StatusCode.UNIMPLEMENTED,
-                    "UnaryUnary should only return a single message",
+                    "StreamUnary should only return a single message",
                 )
 
         self._raise_for_status(
