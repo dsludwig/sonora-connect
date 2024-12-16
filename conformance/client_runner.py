@@ -76,7 +76,7 @@ def log_message(request: Any, response: Any):
 
 def to_pb_headers(headers: List[Tuple[str, str]]) -> list[service_pb2.Header]:
     h_dict: dict[str, list[str]] = collections.defaultdict(list)
-    for key, value in headers:
+    for key, value in headers or []:
         if key.endswith("-bin") and isinstance(value, bytes):
             h_dict[key].append(base64.b64encode(value))
         else:

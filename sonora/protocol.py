@@ -1,4 +1,5 @@
 import functools
+import json
 import struct
 from urllib.parse import unquote
 
@@ -204,7 +205,7 @@ def pack_trailers(trailers):
     return bytes(data)
 
 
-def unpack_trailers(message):
+def unpack_trailers(message, _initial_metadata=None):
     trailers = []
     for line in message.decode("ascii").splitlines():
         k, v = line.split(":", 1)
@@ -271,7 +272,10 @@ def unpack_error_connect(
             status.details.append(any)
 
     code, message, status_trailing_metadata = rpc_status.to_status(status)
-    trailing_metadata.extend(status_trailing_metadata)
+    if trailing_metadata is None:
+        trailing_metadata = status_trailing_metadata
+    else:
+        trailing_metadata.extend(status_trailing_metadata)
     raise WebRpcError(
         code=code,
         details=message,
@@ -281,6 +285,7 @@ def unpack_error_connect(
 
 
 def unpack_trailers_connect(response, initial_metadata):
+    response = json.loads(response)
     trailing_metadata = None
     if "metadata" in response:
         trailing_metadata = Metadata(response["metadata"])
@@ -444,6 +449,24 @@ def raise_for_status(headers, trailers=None, expected_content_types=[]):
             details,
             initial_metadata=Metadata(headers) if trailers else None,
             trailing_metadata=Metadata(trailers) if trailers else Metadata(headers),
+        )
+
+
+def raise_for_status_connect(headers, trailers=None, expected_content_types=[]):
+    if trailers:
+        # prioritize trailers over headers
+        metadata = Metadata(trailers)
+        metadata.extend(headers)
+    else:
+        metadata = Metadata(headers)
+
+    if (
+        "content-type" in metadata
+        and metadata["content-type"] not in expected_content_types
+    ):
+        raise WebRpcError(
+            grpc.StatusCode.UNKNOWN,
+            "Invalid content-type",
         )
 
 

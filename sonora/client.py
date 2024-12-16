@@ -111,9 +111,13 @@ class Multicallable:
         if self._connect:
             self._wrap_message = protocol.wrap_message_connect
             self._unwrap_message_stream = protocol.unwrap_message_stream_connect
+            self._unpack_trailers = protocol.unpack_trailers_connect
+            self._raise_for_status = protocol.raise_for_status_connect
         else:
             self._wrap_message = protocol.wrap_message
             self._unwrap_message_stream = protocol.unwrap_message_stream
+            self._unpack_trailers = protocol.unpack_trailers
+            self._raise_for_status = protocol.raise_for_status
 
     def future(self, request):
         raise NotImplementedError()
@@ -154,6 +158,8 @@ class UnaryUnaryMulticallable(Multicallable):
             self._deserializer,
             self._wrap_message,
             self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
             self._connect,
             self._expected_content_types,
         )
@@ -191,7 +197,10 @@ class UnaryStreamMulticallable(Multicallable):
             self._deserializer,
             self._wrap_message,
             self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
             self._connect,
+            self._expected_content_types,
         )
 
 
@@ -228,6 +237,8 @@ class StreamUnaryMulticallable(Multicallable):
             self._deserializer,
             self._wrap_message,
             self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
             self._connect,
             self._expected_content_types,
         )
@@ -258,6 +269,8 @@ class StreamStreamMulticallable(Multicallable):
             self._deserializer,
             self._wrap_message,
             self._unwrap_message_stream,
+            self._unpack_trailers,
+            self._raise_for_status,
             self._connect,
             self._expected_content_types,
         )
@@ -275,6 +288,8 @@ class Call:
         deserializer,
         wrap_message,
         unwrap_message_stream,
+        unpack_trailers,
+        raise_for_status,
         connect,
         expected_content_types,
     ):
@@ -287,6 +302,8 @@ class Call:
         self._deserializer = deserializer
         self._wrap_message = wrap_message
         self._unwrap_message_stream = unwrap_message_stream
+        self._unpack_trailers = unpack_trailers
+        self._raise_for_status = raise_for_status
         self._expected_content_types = expected_content_types
         self._response = None
         self._trailers = None
@@ -414,7 +431,7 @@ class UnaryUnaryCall(Call):
             )
 
         if trailers:
-            self._trailers = protocol.unpack_trailers(message)
+            self._trailers = self._unpack_trailers(message, self.initial_metadata())
         elif compressed:
             raise protocol.WebRpcError(
                 grpc.StatusCode.INTERNAL, "Unexpected compression"
@@ -433,14 +450,14 @@ class UnaryUnaryCall(Call):
             pass
         else:
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, self.initial_metadata())
             else:
                 raise protocol.WebRpcError(
                     grpc.StatusCode.UNIMPLEMENTED,
                     "UnaryUnary should only return a single message",
                 )
 
-        protocol.raise_for_status(
+        self._raise_for_status(
             self._response.headers, self._trailers, self._expected_content_types
         )
 
@@ -475,14 +492,14 @@ class UnaryStreamCall(Call):
 
         for trailers, _, message in self._unwrap_message_stream(stream):
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, self.initial_metadata())
                 break
             else:
                 yield self._deserializer(message)
 
         self._response.release_conn()
 
-        protocol.raise_for_status(
+        self._raise_for_status(
             self._response.headers, self._trailers, self._expected_content_types
         )
 
@@ -529,7 +546,7 @@ class StreamUnaryCall(Call):
         try:
             trailers, compressed, message = next(messages)
         except StopIteration:
-            protocol.raise_for_status(
+            self._raise_for_status(
                 self._response.headers,
                 expected_content_types=self._expected_content_types,
             )
@@ -539,7 +556,7 @@ class StreamUnaryCall(Call):
             )
 
         if trailers:
-            self._trailers = protocol.unpack_trailers(message)
+            self._trailers = self._unpack_trailers(message, self.initial_metadata())
         elif compressed:
             raise protocol.WebRpcError(
                 grpc.StatusCode.INTERNAL, "Unexpected compression"
@@ -558,14 +575,14 @@ class StreamUnaryCall(Call):
             pass
         else:
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, self.initial_metadata())
             else:
                 raise protocol.WebRpcError(
                     grpc.StatusCode.UNIMPLEMENTED,
                     "UnaryUnary should only return a single message",
                 )
 
-        protocol.raise_for_status(
+        self._raise_for_status(
             self._response.headers, self._trailers, self._expected_content_types
         )
 
@@ -603,14 +620,14 @@ class StreamStreamCall(Call):
 
         for trailers, _, message in self._unwrap_message_stream(stream):
             if trailers:
-                self._trailers = protocol.unpack_trailers(message)
+                self._trailers = self._unpack_trailers(message, self.initial_metadata())
                 break
             else:
                 yield self._deserializer(message)
 
         self._response.release_conn()
 
-        protocol.raise_for_status(
+        self._raise_for_status(
             self._response.headers, self._trailers, self._expected_content_types
         )
 
