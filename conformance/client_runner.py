@@ -162,11 +162,15 @@ def handle_message(
         channel = sonora.client.insecure_web_channel(
             url, pool_manager_kws={"ssl_context": ssl_context}
         )
+    elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
+        channel = sonora.client.insecure_connect_channel(
+            url, pool_manager_kws={"ssl_context": ssl_context}
+        )
     else:
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
             error=client_compat_pb2.ClientErrorResult(
-                message=f"TODO unknown message type: {any.TypeName()}"
+                message=f"TODO unknown message type: {msg.protocol}"
             ),
         )
 
@@ -349,7 +353,7 @@ async def handle_message_async(
         return client_compat_pb2.ClientCompatResponse(
             test_name=msg.test_name,
             error=client_compat_pb2.ClientErrorResult(
-                message=f"TODO unknown message type: {any.TypeName()}"
+                message=f"TODO unknown message type: {msg.protocol}"
             ),
         )
 
