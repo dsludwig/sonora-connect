@@ -192,6 +192,10 @@ class ProtocolError(Exception):
     pass
 
 
+class InvalidContentType(ProtocolError):
+    pass
+
+
 def decode_identity(compressed, message):
     if compressed:
         raise ProtocolError("Cannot decode compressed message with `identity` encoder")

@@ -75,6 +75,12 @@ class Metadata(abc.Mapping):
 
     getlist = get_all
 
+    def get(
+        self, key: MetadataKey, other: MetadataValue | None = None
+    ) -> MetadataValue | None:
+        values = self._state.get(self._normalize(key))
+        return values[0] if values else other
+
     def __getitem__(self, key: MetadataKey) -> MetadataValue:
         values = self._state[self._normalize(key)]
         return values[0]
