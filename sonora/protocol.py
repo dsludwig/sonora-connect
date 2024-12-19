@@ -237,9 +237,6 @@ def encode_headers(metadata):
 
             value = b64encode(value)
 
-        if isinstance(header, bytes):
-            header = header.decode("ascii")
-
         yield header, value
 
 

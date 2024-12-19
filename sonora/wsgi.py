@@ -80,6 +80,10 @@ class grpcWSGI(grpc.Server):
                 context.invocation_metadata(), rpc_method, enable_trailers=False
             )
         except protocol.InvalidContentType:
+            # If Content-Type does not begin with "application/grpc", gRPC servers
+            # SHOULD respond with HTTP status of 415 (Unsupported Media Type). This
+            # will prevent other HTTP/2 clients from interpreting a gRPC error
+            # response, which uses status 200 (OK), as successful.
             start_response("415 Invalid Content Type", [])
             return
 

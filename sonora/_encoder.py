@@ -11,7 +11,7 @@ from google.protobuf.message import Message
 from google.rpc import status_pb2
 
 from sonora import protocol
-from sonora._events import SendBody, ServerEvents, StartResponse
+from sonora._events import SendBody, SendTrailers, ServerEvents, StartResponse
 from sonora.metadata import Metadata
 
 Deserializer = typing.Callable[[bytes], Message]
@@ -312,6 +312,8 @@ class GrpcCodec(Codec):
         if self._started:
             return
 
+        self._started = True
+
         headers = protocol.encode_headers(
             itertools.chain(
                 (("content-type", self.content_type),),
@@ -319,7 +321,7 @@ class GrpcCodec(Codec):
             )
         )
 
-        yield StartResponse(200, "OK", headers)
+        yield StartResponse(200, "OK", headers, trailers=self.requires_trailers)
 
     def send_response(self, response):
         yield from self._start()
@@ -341,10 +343,7 @@ class GrpcCodec(Codec):
         if self._trailing_metadata:
             trailers.extend(self._trailing_metadata)
 
-        body = protocol.pack_trailers(protocol.encode_headers(trailers))
-        body = self.wrap_message(True, False, body)
-
-        yield SendBody(body)
+        yield SendTrailers(protocol.encode_headers(trailers))
 
 
 class GrpcJsonCodec(GrpcCodec):
@@ -363,6 +362,22 @@ class GrpcWebCodec(GrpcCodec):
     @property
     def requires_trailers(self):
         return False
+
+    def end_response(self):
+        yield from self._start()
+
+        trailers = [("grpc-status", str(self._code.value[0]))]
+
+        if self._details:
+            trailers.append(("grpc-message", quote(self._details)))
+
+        if self._trailing_metadata:
+            trailers.extend(self._trailing_metadata)
+
+        body = protocol.pack_trailers(protocol.encode_headers(trailers))
+        body = self.wrap_message(True, False, body)
+
+        yield SendBody(body, more_body=False)
 
 
 class GrpcWebJsonCodec(GrpcWebCodec):
@@ -438,6 +453,7 @@ class ConnectUnaryCodec(ConnectCodec):
 
     wrap_message = staticmethod(protocol.bare_wrap_message)
     unwrap_message_stream = staticmethod(protocol.bare_unwrap_message_stream)
+    unwrap_message_asgi = staticmethod(protocol.bare_unwrap_message_asgi)
 
     def send_response(self, response):
         self._response = response
@@ -471,11 +487,12 @@ class ConnectUnaryCodec(ConnectCodec):
         )
 
         yield StartResponse(status_code, phrase, headers)
-        yield SendBody(body)
+        yield SendBody(body, more_body=False)
 
     def end_response(self):
         if self._code != grpc.StatusCode.OK:
             yield from self._end_error()
+            return
 
         if self._response is None:
             body = b""
@@ -499,7 +516,7 @@ class ConnectUnaryCodec(ConnectCodec):
         )
 
         yield StartResponse(200, "OK", headers)
-        yield SendBody(body)
+        yield SendBody(body, more_body=False)
 
 
 class ConnectUnaryJsonCodec(ConnectUnaryCodec):
@@ -537,7 +554,7 @@ class ConnectStreamCodec(ConnectCodec):
         body = json.dumps(end_of_stream).encode()
         body = self.wrap_message(True, False, body)
 
-        yield SendBody(body)
+        yield SendBody(body, more_body=False)
 
 
 class ConnectStreamJsonCodec(ConnectStreamCodec):
@@ -556,9 +573,6 @@ def get_encoding(encoding: str | None) -> Encoding:
     if encoding is None or encoding.lower() == "identity":
         return IdentityEncoding()
     return InvalidEncoding()
-    # raise protocol.WebRpcError(
-    #     code=grpc.StatusCode.UNIMPLEMENTED, details=f"Unsupported encoding: {encoding}"
-    # )
 
 
 _CODECS = [
