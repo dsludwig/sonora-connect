@@ -1,10 +1,7 @@
 import itertools
-import json
 import logging
 import time
 from collections import namedtuple
-from http import HTTPStatus
-from urllib.parse import quote
 
 import grpc
 
@@ -78,7 +75,6 @@ class grpcWSGI(grpc.Server):
 
     def _do_grpc_request(self, rpc_method, environ, start_response):
         context = self._create_context(environ)
-
         try:
             codec = get_codec(
                 context.invocation_metadata(), rpc_method, enable_trailers=False
@@ -126,23 +122,18 @@ class grpcWSGI(grpc.Server):
                     if context.time_remaining() is not None:
                         resp = _timeout_generator(context, resp)
             except grpc.RpcError:
-                # logging.exception("Exception handling RPC method")
                 pass
             except NotImplementedError:
-                # logging.exception("Exception handling RPC method")
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             except protocol.InvalidEncoding:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             except protocol.ProtocolError:
-                # logging.exception("Exception handling RPC method")
                 context.set_code(grpc.StatusCode.INTERNAL)
             except Exception:
                 logging.exception("Exception handling RPC method")
                 context.set_code(grpc.StatusCode.INTERNAL)
 
-        headers = [
-            # ("Content-Type", codec.content_type),
-        ]
+        headers = []
         if self._enable_cors:
             headers.append(
                 (
@@ -169,89 +160,6 @@ class grpcWSGI(grpc.Server):
                 resp,
             )
 
-    def _do_streaming_response(
-        self,
-        codec: Codec,
-        start_response,
-        context,
-        headers,
-        resp,
-    ):
-        first_message = None
-        if resp is not None:
-            try:
-                first_message = next(resp)
-            except (grpc.RpcError, StopIteration):
-                pass
-
-        if context._initial_metadata:
-            headers.extend(context._initial_metadata)
-
-        start_response("200 OK", headers)
-
-        if first_message is not None:
-            yield codec.wrap_message(
-                False, False, codec.serializer.serialize_response(first_message)
-            )
-
-        if resp is not None:
-            try:
-                for message in resp:
-                    yield codec.wrap_message(
-                        False, False, codec.serializer.serialize_response(message)
-                    )
-            except (grpc.RpcError, StopIteration):
-                pass
-
-        trailers = [("grpc-status", str(context.code.value[0]))]
-
-        if context.details:
-            trailers.append(("grpc-message", quote(context.details.encode("utf8"))))
-
-        if context._trailing_metadata:
-            trailers.extend(context._trailing_metadata)
-
-        trailer_message = protocol.pack_trailers(trailers)
-
-        if connect:
-            if context.code != grpc.StatusCode.OK:
-                code = context.code.name.lower()
-                if code == "cancelled":
-                    code = "canceled"
-                error = {"code": code}
-                if context.details:
-                    error["message"] = context.details
-            else:
-                error = None
-
-            trailer_dict = {}
-            for name, value in trailers:
-                if name.lower() == "grpc-status-details-bin":
-                    # TODO: it's annoying to have to round trip this
-                    from google.rpc import status_pb2
-
-                    binvalue = protocol.b64decode(value)
-                    status_details = status_pb2.Status()
-                    status_details.ParseFromString(binvalue)
-                    error["details"] = [
-                        {
-                            "type": d.type_url.rpartition("/")[2],
-                            "value": protocol.b64encode(d.value),
-                        }
-                        for d in status_details.details
-                    ]
-                else:
-                    trailer_dict.setdefault(name, []).append(value)
-
-            trailer = {"metadata": trailer_dict}
-            if error:
-                trailer["error"] = error
-            trailer_message = json.dumps(trailer).encode()
-            trailer_data = wrap_message(True, False, trailer_message)
-            yield trailer_data
-        else:
-            yield wrap_message(True, False, trailer_message)
-
     def _do_events(
         self,
         start_response,
@@ -269,6 +177,48 @@ class grpcWSGI(grpc.Server):
             else:
                 raise ValueError("Unexpected codec event")
 
+    def _do_streaming_response(
+        self,
+        codec: Codec,
+        start_response,
+        context,
+        headers,
+        resp,
+    ):
+        # fetch the first message to get the initial metadata set.
+        first_message = None
+        if resp is not None:
+            try:
+                first_message = next(resp)
+            except (grpc.RpcError, StopIteration):
+                pass
+
+        if context._initial_metadata:
+            codec.set_initial_metadata(context._initial_metadata)
+
+        if first_message is not None:
+            yield from self._do_events(
+                start_response, headers, codec.send_response(first_message)
+            )
+
+        if resp is not None:
+            try:
+                for message in resp:
+                    yield from self._do_events(
+                        start_response, headers, codec.send_response(message)
+                    )
+            except (grpc.RpcError, StopIteration):
+                pass
+
+        codec.set_code(context.code)
+        if context.details:
+            codec.set_details(context.details)
+
+        if context._trailing_metadata:
+            codec.set_trailing_metadata(context._trailing_metadata)
+
+        yield from self._do_events(start_response, headers, codec.end_response())
+
     def _do_unary_response(
         self,
         codec: Codec,
@@ -277,13 +227,6 @@ class grpcWSGI(grpc.Server):
         headers,
         resp,
     ):
-        # if context.code != grpc.StatusCode.OK and connect:
-        #     yield from self._do_connect_error(
-        #         start_response, context, headers, connect_stream, wrap_message
-        #     )
-        #     return
-
-        # events = []
         # TODO: is a codec a context? or wraps one?
         codec.set_code(context.code)
         if context.details:
@@ -291,12 +234,6 @@ class grpcWSGI(grpc.Server):
 
         if context._initial_metadata:
             codec.set_initial_metadata(context._initial_metadata)
-            # headers.extend(context._initial_metadata)
-
-        # trailers = [("grpc-status", str(context.code.value[0]))]
-
-        # if context.details:
-        #     trailers.append(("grpc-message", quote(context.details)))
 
         if context._trailing_metadata:
             codec.set_trailing_metadata(context._trailing_metadata)
@@ -305,130 +242,8 @@ class grpcWSGI(grpc.Server):
             yield from self._do_events(
                 start_response, headers, codec.send_response(resp)
             )
-        #     message_data = codec.wrap_message(False, False, codec.serializer.serialize_response(resp))
-        # else:
-        #     message_data = b""
 
         yield from self._do_events(start_response, headers, codec.end_response())
-
-        # for event in events:
-        #     if isinstance(event, _events.StartResponse):
-        #         start_response(
-        #             f"{event.status_code} {event.phrase}",
-        #             itertools.chain(headers, event.headers),
-        #         )
-        #     elif isinstance(event, _events.SendBody):
-        #         yield event.body
-        #     else:
-        #         raise ValueError("Unexpected codec event")
-
-        # trailers.extend(context._trailing_metadata)
-
-        # trailer_message = protocol.pack_trailers(trailers)
-        # trailer_data = codec.wrap_message(True, False, trailer_message)
-
-        # if connect:
-        #     if connect_stream:
-        #         trailer_dict = {}
-        #         for name, value in trailers:
-        #             trailer_dict.setdefault(name, []).append(value)
-        #         trailer_message = json.dumps({"metadata": trailer_dict}).encode()
-        #         trailer_data = protocol.wrap_message_connect(
-        #             True, False, trailer_message
-        #         )
-        #     else:
-        #         headers.extend((f"trailer-{name}", value) for name, value in trailers)
-
-        # content_length = len(message_data) + (
-        #     0 if (connect and not connect_stream) else len(trailer_data)
-        # )
-
-        # headers.append(("content-length", str(content_length)))
-
-        # ew
-        # if (
-        #     context.code == grpc.StatusCode.UNKNOWN
-        #     and context.details == b"Unsupported content-type"
-        # ):
-        #     start_response("415 Unsupported Media Type", headers)
-        # else:
-        #     start_response("200 OK", headers)
-
-        # yield message_data
-
-        # if not connect or connect_stream:
-        #     yield trailer_data
-
-    def _do_connect_error(
-        self, start_response, context, headers, connect_stream, wrap_message
-    ):
-        if connect_stream:
-            status = "200 OK"
-        elif context.code == grpc.StatusCode.CANCELLED:
-            status = "499 Canceled"
-        else:
-            http_status = HTTPStatus(protocol.status_code_to_http(context.code))
-            status = f"{http_status.value} {http_status.phrase}"
-
-        code = context.code.name.lower()
-        if code == "cancelled":
-            code = "canceled"
-        error = {"code": code}
-        if context.details:
-            error["message"] = context.details
-
-        # headers =
-        if context._initial_metadata:
-            headers.extend(context._initial_metadata)
-
-        if not connect_stream and not context._started_response:
-            # set correct content-type for unary errors
-            headers = [
-                (name, value)
-                for name, value in headers
-                if name.lower() != "content-type"
-            ]
-            headers.append(("content-type", "application/json"))
-
-        trailers = {}
-        if context._trailing_metadata:
-            for name, value in context._trailing_metadata:
-                if name.lower() == "grpc-status-details-bin":
-                    # TODO: it's annoying to have to round trip this
-                    from google.rpc import status_pb2
-
-                    binvalue = protocol.b64decode(value)
-                    status_details = status_pb2.Status()
-                    status_details.ParseFromString(binvalue)
-                    error["details"] = [
-                        {
-                            "type": d.type_url.rpartition("/")[2],
-                            "value": protocol.b64encode(d.value),
-                        }
-                        for d in status_details.details
-                    ]
-                elif connect_stream:
-                    trailers.setdefault(name, []).append(value)
-                else:
-                    headers.append((name, value))
-
-        if context._started_response:
-            error_body = wrap_message(
-                True, False, json.dumps({"error": error, "metadata": trailers}).encode()
-            )
-            yield error_body
-        else:
-            if connect_stream:
-                error_body = wrap_message(
-                    True,
-                    False,
-                    json.dumps({"error": error, "metadata": trailers}).encode(),
-                )
-            else:
-                error_body = json.dumps(error).encode()
-
-            start_response(status, headers)
-            yield error_body
 
     def _do_cors_preflight(self, environ, start_response):
         headers = [
@@ -506,7 +321,6 @@ class ServicerContext(grpc.ServicerContext):
         self._invocation_metadata = metadata or Metadata()
         self._initial_metadata = None
         self._trailing_metadata = None
-        self._started_response = False
 
     def set_code(self, code):
         if isinstance(code, grpc.StatusCode):

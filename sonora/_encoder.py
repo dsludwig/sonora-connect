@@ -4,6 +4,7 @@ import json
 import struct
 import typing
 from http import HTTPStatus
+from urllib.parse import quote
 
 import grpc
 from google.protobuf.message import Message
@@ -280,6 +281,10 @@ class Codec:
 
 
 class GrpcCodec(Codec):
+    def __init__(self, encoding, serializer):
+        super().__init__(encoding, serializer)
+        self._started = False
+
     @property
     def requires_trailers(self):
         return True
@@ -302,6 +307,44 @@ class GrpcCodec(Codec):
             )
             + message
         )
+
+    def _start(self):
+        if self._started:
+            return
+
+        headers = protocol.encode_headers(
+            itertools.chain(
+                (("content-type", self.content_type),),
+                (self._initial_metadata),
+            )
+        )
+
+        yield StartResponse(200, "OK", headers)
+
+    def send_response(self, response):
+        yield from self._start()
+
+        body = self.wrap_message(
+            False, False, self.serializer.serialize_response(response)
+        )
+
+        yield SendBody(body)
+
+    def end_response(self):
+        yield from self._start()
+
+        trailers = [("grpc-status", str(self._code.value[0]))]
+
+        if self._details:
+            trailers.append(("grpc-message", quote(self._details)))
+
+        if self._trailing_metadata:
+            trailers.extend(self._trailing_metadata)
+
+        body = protocol.pack_trailers(protocol.encode_headers(trailers))
+        body = self.wrap_message(True, False, body)
+
+        yield SendBody(body)
 
 
 class GrpcJsonCodec(GrpcCodec):
@@ -364,6 +407,9 @@ class ConnectCodec(GrpcCodec):
         return (trailers << 1) | (compressed)
 
     def unpack_error(self) -> dict | None:
+        if self._code == grpc.StatusCode.OK:
+            return None
+
         code = protocol.code_to_named_status(self._code)
         error = {"code": code}
         if self._details:
@@ -469,34 +515,29 @@ class ConnectUnaryProtoCodec(ConnectUnaryCodec):
 
 
 class ConnectStreamCodec(ConnectCodec):
+    def __init__(self, encoding, serializer):
+        super().__init__(encoding, serializer)
+        self._started = False
+
     wrap_message = staticmethod(protocol.wrap_message_connect)
-    unwrap_message = staticmethod(protocol.unwrap_message_stream_connect)
+    unwrap_message_stream = staticmethod(protocol.unwrap_message_stream_connect)
 
     def end_response(self):
-        trailer_dict = {}
-        for name, value in trailers:
-            trailer_dict.setdefault(name, []).append(value)
-        trailer_message = json.dumps({"metadata": trailer_dict}).encode()
-        trailer_data = self.wrap_message(True, False, trailer_message)
-        for name, value in context._trailing_metadata:
-            if name.lower() == "grpc-status-details-bin":
-                # TODO: it's annoying to have to round trip this
-                from google.rpc import status_pb2
+        yield from self._start()
 
-                binvalue = protocol.b64decode(value)
-                status_details = status_pb2.Status()
-                status_details.ParseFromString(binvalue)
-                error["details"] = [
-                    {
-                        "type": d.type_url.rpartition("/")[2],
-                        "value": protocol.b64encode(d.value),
-                    }
-                    for d in status_details.details
-                ]
-            elif connect_stream:
-                trailers.setdefault(name, []).append(value)
-            else:
-                headers.append((name, value))
+        trailer_dict = {}
+        for name, value in protocol.encode_headers(self._trailing_metadata):
+            trailer_dict.setdefault(name, []).append(value)
+
+        end_of_stream = {"metadata": trailer_dict}
+        error = self.unpack_error()
+        if error is not None:
+            end_of_stream["error"] = error
+
+        body = json.dumps(end_of_stream).encode()
+        body = self.wrap_message(True, False, body)
+
+        yield SendBody(body)
 
 
 class ConnectStreamJsonCodec(ConnectStreamCodec):
