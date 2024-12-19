@@ -1,4 +1,4 @@
-import base64
+import itertools
 import json
 import logging
 import time
@@ -8,7 +8,9 @@ from urllib.parse import quote
 
 import grpc
 
-from sonora import protocol
+from sonora import _events, protocol
+from sonora._encoder import Codec, get_codec
+from sonora.metadata import Metadata
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")
@@ -65,90 +67,34 @@ class grpcWSGI(grpc.Server):
         if timeout is None and environ.get("HTTP_CONNECT_TIMEOUT_MS"):
             timeout = int(environ.get("HTTP_CONNECT_TIMEOUT_MS")) / 1000
 
-        metadata = []
+        metadata = Metadata()
         for key, value in environ.items():
             if key.startswith("HTTP_"):
                 header = key[5:].lower().replace("_", "-")
-
-                if header.endswith("-bin"):
-                    value = base64.b64decode(value)
-
-                metadata.append((header, value))
+                metadata.add(header, value)
+        metadata.add("content-type", environ.get("CONTENT_TYPE"))
 
         return ServicerContext(timeout, metadata)
 
     def _do_grpc_request(self, rpc_method, environ, start_response):
         context = self._create_context(environ)
 
-        wrap_message = protocol.wrap_message
-        unwrap_message_stream = protocol.unwrap_message_stream
-        deserialize = rpc_method.request_deserializer
-        serialize = rpc_method.response_serializer
-
-        connect = False
-        connect_stream = False
-        content_type = environ["CONTENT_TYPE"]
-        response_content_type = "application/grpc-web+proto"
-        if content_type == "application/grpc-web-text":
-            unwrap_message_stream = protocol.b64_unwrap_message_stream
-            wrap_message = protocol.b64_wrap_message
-            response_content_type = "application/grpc-web-text"
-        elif content_type in (
-            "application/grpc-web",
-            "application/grpc-web+proto",
-        ):
-            unwrap_message_stream = protocol.unwrap_message_stream
-        elif content_type == "application/grpc-web+json":
-            response_content_type = "application/grpc-web+json"
-            unwrap_message_stream = protocol.unwrap_message_stream
-            deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
-            serialize = protocol.serialize_json(rpc_method.response_serializer)
-        elif content_type == "application/connect+proto":
-            response_content_type = "application/connect+proto"
-            wrap_message = protocol.wrap_message_connect
-            unwrap_message_stream = protocol.unwrap_message_stream_connect
-            connect = True
-            connect_stream = True
-        elif content_type == "application/connect+json":
-            deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
-            serialize = protocol.serialize_json(rpc_method.response_serializer)
-            wrap_message = protocol.wrap_message_connect
-            unwrap_message_stream = protocol.unwrap_message_stream_connect
-            connect = True
-            connect_stream = True
-            response_content_type = "application/connect+json"
-        elif content_type == "application/proto":
-            response_content_type = "application/proto"
-            wrap_message = protocol.bare_wrap_message
-            unwrap_message_stream = protocol.bare_unwrap_message_stream
-            connect = True
-        elif content_type == "application/json":
-            response_content_type = "application/json"
-            wrap_message = protocol.bare_wrap_message
-            unwrap_message_stream = protocol.bare_unwrap_message_stream
-            deserialize = protocol.deserialize_json(rpc_method.request_deserializer)
-            serialize = protocol.serialize_json(rpc_method.response_serializer)
-            connect = True
-        else:
-            context.set_details(b"Unsupported content-type")
-            context.set_code(grpc.StatusCode.UNKNOWN)
-
-        resp = None
-        request_proto_iterator = None
-
-        if environ.get("HTTP_GRPC_ENCODING", "identity") != "identity":
-            context.set_details("Unsupported encoding")
-            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        elif environ.get("HTTP_CONTENT_ENCODING", "identity") != "identity":
-            context.set_details("Unsupported encoding")
-            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        elif context.code == grpc.StatusCode.OK:
-            decode_message = protocol.decode_identity
-            stream = environ["wsgi.input"]
-            request_proto_iterator = (
-                deserialize(decode_message(compressed, bytes(message)))
-                for _, compressed, message in unwrap_message_stream(stream)
+        try:
+            codec = get_codec(
+                context.invocation_metadata(), rpc_method, enable_trailers=False
             )
+        except protocol.InvalidContentType:
+            start_response("415 Invalid Content Type", [])
+            return
+
+        stream = environ["wsgi.input"]
+        request_proto_iterator = (
+            codec.serializer.deserialize_request(
+                codec.encoding.decode(compressed, bytes(message))
+            )
+            for _, compressed, message in codec.unwrap_message_stream(stream)
+        )
+        resp = None
 
         if not rpc_method.request_streaming and not rpc_method.response_streaming:
             method = rpc_method.unary_unary
@@ -180,17 +126,22 @@ class grpcWSGI(grpc.Server):
                     if context.time_remaining() is not None:
                         resp = _timeout_generator(context, resp)
             except grpc.RpcError:
+                # logging.exception("Exception handling RPC method")
                 pass
             except NotImplementedError:
+                # logging.exception("Exception handling RPC method")
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            except protocol.InvalidEncoding:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             except protocol.ProtocolError:
+                # logging.exception("Exception handling RPC method")
                 context.set_code(grpc.StatusCode.INTERNAL)
             except Exception:
                 logging.exception("Exception handling RPC method")
                 context.set_code(grpc.StatusCode.INTERNAL)
 
         headers = [
-            ("Content-Type", response_content_type),
+            # ("Content-Type", codec.content_type),
         ]
         if self._enable_cors:
             headers.append(
@@ -203,38 +154,28 @@ class grpcWSGI(grpc.Server):
 
         if rpc_method.response_streaming:
             yield from self._do_streaming_response(
-                rpc_method,
+                codec,
                 start_response,
-                serialize,
-                wrap_message,
                 context,
                 headers,
                 resp,
-                connect,
             )
         else:
             yield from self._do_unary_response(
-                rpc_method,
+                codec,
                 start_response,
-                serialize,
-                wrap_message,
                 context,
                 headers,
                 resp,
-                connect,
-                connect_stream,
             )
 
     def _do_streaming_response(
         self,
-        rpc_method,
+        codec: Codec,
         start_response,
-        serialize,
-        wrap_message,
         context,
         headers,
         resp,
-        connect,
     ):
         first_message = None
         if resp is not None:
@@ -249,12 +190,16 @@ class grpcWSGI(grpc.Server):
         start_response("200 OK", headers)
 
         if first_message is not None:
-            yield wrap_message(False, False, serialize(first_message))
+            yield codec.wrap_message(
+                False, False, codec.serializer.serialize_response(first_message)
+            )
 
         if resp is not None:
             try:
                 for message in resp:
-                    yield wrap_message(False, False, serialize(message))
+                    yield codec.wrap_message(
+                        False, False, codec.serializer.serialize_response(message)
+                    )
             except (grpc.RpcError, StopIteration):
                 pass
 
@@ -307,74 +252,112 @@ class grpcWSGI(grpc.Server):
         else:
             yield wrap_message(True, False, trailer_message)
 
+    def _do_events(
+        self,
+        start_response,
+        headers,
+        events,
+    ):
+        for event in events:
+            if isinstance(event, _events.StartResponse):
+                start_response(
+                    f"{event.status_code} {event.phrase}",
+                    itertools.chain(headers, event.headers),
+                )
+            elif isinstance(event, _events.SendBody):
+                yield event.body
+            else:
+                raise ValueError("Unexpected codec event")
+
     def _do_unary_response(
         self,
-        rpc_method,
+        codec: Codec,
         start_response,
-        serialize,
-        wrap_message,
-        context,
+        context: grpc.ServicerContext,
         headers,
         resp,
-        connect,
-        connect_stream,
     ):
-        if context.code != grpc.StatusCode.OK and connect:
-            yield from self._do_connect_error(
-                start_response, context, headers, connect_stream, wrap_message
-            )
-            return
+        # if context.code != grpc.StatusCode.OK and connect:
+        #     yield from self._do_connect_error(
+        #         start_response, context, headers, connect_stream, wrap_message
+        #     )
+        #     return
 
-        if resp:
-            message_data = wrap_message(False, False, serialize(resp))
-        else:
-            message_data = b""
+        # events = []
+        # TODO: is a codec a context? or wraps one?
+        codec.set_code(context.code)
+        if context.details:
+            codec.set_details(context.details)
 
         if context._initial_metadata:
-            headers.extend(context._initial_metadata)
+            codec.set_initial_metadata(context._initial_metadata)
+            # headers.extend(context._initial_metadata)
 
-        trailers = [("grpc-status", str(context.code.value[0]))]
+        # trailers = [("grpc-status", str(context.code.value[0]))]
 
-        if context.details:
-            trailers.append(("grpc-message", quote(context.details)))
+        # if context.details:
+        #     trailers.append(("grpc-message", quote(context.details)))
 
         if context._trailing_metadata:
-            trailers.extend(context._trailing_metadata)
+            codec.set_trailing_metadata(context._trailing_metadata)
 
-        trailer_message = protocol.pack_trailers(trailers)
-        trailer_data = wrap_message(True, False, trailer_message)
+        if resp:
+            yield from self._do_events(
+                start_response, headers, codec.send_response(resp)
+            )
+        #     message_data = codec.wrap_message(False, False, codec.serializer.serialize_response(resp))
+        # else:
+        #     message_data = b""
 
-        if connect:
-            if connect_stream:
-                trailer_dict = {}
-                for name, value in trailers:
-                    trailer_dict.setdefault(name, []).append(value)
-                trailer_message = json.dumps({"metadata": trailer_dict}).encode()
-                trailer_data = protocol.wrap_message_connect(
-                    True, False, trailer_message
-                )
-            else:
-                headers.extend((f"trailer-{name}", value) for name, value in trailers)
+        yield from self._do_events(start_response, headers, codec.end_response())
 
-        content_length = len(message_data) + (
-            0 if (connect and not connect_stream) else len(trailer_data)
-        )
+        # for event in events:
+        #     if isinstance(event, _events.StartResponse):
+        #         start_response(
+        #             f"{event.status_code} {event.phrase}",
+        #             itertools.chain(headers, event.headers),
+        #         )
+        #     elif isinstance(event, _events.SendBody):
+        #         yield event.body
+        #     else:
+        #         raise ValueError("Unexpected codec event")
 
-        headers.append(("content-length", str(content_length)))
+        # trailers.extend(context._trailing_metadata)
+
+        # trailer_message = protocol.pack_trailers(trailers)
+        # trailer_data = codec.wrap_message(True, False, trailer_message)
+
+        # if connect:
+        #     if connect_stream:
+        #         trailer_dict = {}
+        #         for name, value in trailers:
+        #             trailer_dict.setdefault(name, []).append(value)
+        #         trailer_message = json.dumps({"metadata": trailer_dict}).encode()
+        #         trailer_data = protocol.wrap_message_connect(
+        #             True, False, trailer_message
+        #         )
+        #     else:
+        #         headers.extend((f"trailer-{name}", value) for name, value in trailers)
+
+        # content_length = len(message_data) + (
+        #     0 if (connect and not connect_stream) else len(trailer_data)
+        # )
+
+        # headers.append(("content-length", str(content_length)))
 
         # ew
-        if (
-            context.code == grpc.StatusCode.UNKNOWN
-            and context.details == b"Unsupported content-type"
-        ):
-            start_response("415 Unsupported Media Type", headers)
-        else:
-            start_response("200 OK", headers)
+        # if (
+        #     context.code == grpc.StatusCode.UNKNOWN
+        #     and context.details == b"Unsupported content-type"
+        # ):
+        #     start_response("415 Unsupported Media Type", headers)
+        # else:
+        #     start_response("200 OK", headers)
 
-        yield message_data
+        # yield message_data
 
-        if not connect or connect_stream:
-            yield trailer_data
+        # if not connect or connect_stream:
+        #     yield trailer_data
 
     def _do_connect_error(
         self, start_response, context, headers, connect_stream, wrap_message
@@ -520,7 +503,7 @@ class ServicerContext(grpc.ServicerContext):
         else:
             self._deadline = None
 
-        self._invocation_metadata = metadata or tuple()
+        self._invocation_metadata = metadata or Metadata()
         self._initial_metadata = None
         self._trailing_metadata = None
         self._started_response = False
@@ -561,11 +544,9 @@ class ServicerContext(grpc.ServicerContext):
         self.set_code(status.code)
         self.set_details(status.details)
         if self._trailing_metadata is None:
-            self.set_trailing_metadata(status.trailing_metadata)
+            self.set_trailing_metadata(Metadata(status.trailing_metadata))
         else:
-            self.set_trailing_metadata(
-                tuple(self._trailing_metadata) + tuple(status.trailing_metadata)
-            )
+            self._trailing_metadata.extend(status.trailing_metadata)
 
         raise grpc.RpcError()
 
@@ -582,7 +563,7 @@ class ServicerContext(grpc.ServicerContext):
         self._initial_metadata = protocol.encode_headers(initial_metadata)
 
     def set_trailing_metadata(self, trailing_metadata):
-        self._trailing_metadata = protocol.encode_headers(trailing_metadata)
+        self._trailing_metadata = Metadata(trailing_metadata)
 
     def peer(self):
         raise NotImplementedError()

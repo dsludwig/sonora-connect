@@ -1,11 +1,16 @@
 import abc
+import itertools
+import json
 import struct
 import typing
+from http import HTTPStatus
 
 import grpc
 from google.protobuf.message import Message
+from google.rpc import status_pb2
 
 from sonora import protocol
+from sonora._events import SendBody, ServerEvents, StartResponse
 from sonora.metadata import Metadata
 
 Deserializer = typing.Callable[[bytes], Message]
@@ -35,10 +40,23 @@ class Encoding:
 
 
 class IdentityEncoding(Encoding):
-    decode = staticmethod(protocol.decode_identity)
+    def decode(self, compressed: bool, message: bytes) -> bytes:
+        if compressed:
+            raise protocol.ProtocolError(
+                "Cannot decode compressed message with `identity` encoder"
+            )
+        return message
 
     def encode(self, message: bytes) -> bytes:
         return message
+
+
+class InvalidEncoding(Encoding):
+    def decode(self, compressed, message):
+        raise protocol.InvalidEncoding("cannot decode with unsupported encoder")
+
+    def encode(self, message):
+        raise protocol.InvalidEncoding("cannot encode with unsupported encoder")
 
 
 class Base64Encoding(Encoding):
@@ -120,14 +138,50 @@ class Codec:
     def __init__(self, encoding: Encoding, serializer: Serializer):
         self.encoding = encoding
         self.serializer = serializer
+        self._initial_metadata = Metadata()
+        self._trailing_metadata = Metadata()
+        self._invocation_metadata = Metadata()
+        self._code = grpc.StatusCode.OK
+        self._details = None
 
     @property
     @abc.abstractmethod
-    def requires_trailers(self): ...
+    def content_type(self) -> str: ...
+    @property
+    @abc.abstractmethod
+    def requires_trailers(self) -> bool: ...
+
     @abc.abstractmethod
     def unpack_header_flags(self, flags: int) -> tuple[bool, bool]: ...
     @abc.abstractmethod
     def pack_header_flags(self, trailers: bool, compressed: bool) -> int: ...
+
+    def set_code(self, code: grpc.StatusCode):
+        self._code = code
+
+    def set_details(self, details: str):
+        self._details = details
+
+    def set_initial_metadata(self, metadata: Metadata):
+        self._initial_metadata = metadata
+
+    def set_trailing_metadata(self, metadata: Metadata):
+        self._trailing_metadata = metadata
+
+    def set_invocation_metadata(self, metadata: Metadata):
+        self._invocation_metadata = metadata
+
+    @abc.abstractmethod
+    def send_request(self, request: Message) -> ServerEvents: ...
+
+    @abc.abstractmethod
+    def end_request(self) -> ServerEvents: ...
+
+    @abc.abstractmethod
+    def send_response(self, response: Message) -> ServerEvents: ...
+
+    @abc.abstractmethod
+    def end_response(self) -> ServerEvents: ...
 
     def wrap_message(self, trailers: bool, compressed: bool, message: bytes) -> bytes:
         return (
@@ -309,10 +363,97 @@ class ConnectCodec(GrpcCodec):
     def pack_header_flags(self, trailers, compressed):
         return (trailers << 1) | (compressed)
 
+    def unpack_error(self) -> dict | None:
+        code = protocol.code_to_named_status(self._code)
+        error = {"code": code}
+        if self._details:
+            error["message"] = self._details
+
+        for name, value in self._trailing_metadata:
+            if name.lower() == "grpc-status-details-bin":
+                # TODO: it's annoying to have to round trip this.
+                status_details = status_pb2.Status()
+                status_details.ParseFromString(value)
+                error["details"] = [
+                    {
+                        "type": d.type_url.rpartition("/")[2],
+                        "value": protocol.b64encode(d.value),
+                    }
+                    for d in status_details.details
+                ]
+        return error
+
 
 class ConnectUnaryCodec(ConnectCodec):
+    def __init__(self, encoding, serializer):
+        super().__init__(encoding, serializer)
+        self._response = None
+        self._request = None
+
     wrap_message = staticmethod(protocol.bare_wrap_message)
-    unwrap_message = staticmethod(protocol.bare_unwrap_message_stream)
+    unwrap_message_stream = staticmethod(protocol.bare_unwrap_message_stream)
+
+    def send_response(self, response):
+        self._response = response
+        return tuple()
+
+    def _end_error(self):
+        # http library does not include definition for 499.
+        if self._code == grpc.StatusCode.CANCELLED:
+            status_code = 499
+            phrase = "Canceled"
+        else:
+            http_status = HTTPStatus(protocol.status_code_to_http(self._code))
+            status_code = http_status.value
+            phrase = http_status.phrase
+
+        error = self.unpack_error()
+        body = json.dumps(error).encode()
+
+        headers = protocol.encode_headers(
+            itertools.chain(
+                (
+                    ("content-type", "application/json"),
+                    ("content-length", str(len(body))),
+                ),
+                (self._initial_metadata),
+                (
+                    (f"trailer-{name}", value)
+                    for (name, value) in self._trailing_metadata
+                ),
+            )
+        )
+
+        yield StartResponse(status_code, phrase, headers)
+        yield SendBody(body)
+
+    def end_response(self):
+        if self._code != grpc.StatusCode.OK:
+            yield from self._end_error()
+
+        if self._response is None:
+            body = b""
+        else:
+            body = self.wrap_message(
+                False, False, self.serializer.serialize_response(self._response)
+            )
+
+        headers = protocol.encode_headers(
+            itertools.chain(
+                (
+                    ("content-type", self.content_type),
+                    ("content-length", str(len(body))),
+                ),
+                (self._initial_metadata),
+                (
+                    (f"trailer-{name}", value)
+                    for (name, value) in self._trailing_metadata
+                ),
+            )
+        )
+
+        yield StartResponse(200, "OK", headers)
+        yield SendBody(body)
 
 
 class ConnectUnaryJsonCodec(ConnectUnaryCodec):
@@ -331,6 +472,32 @@ class ConnectStreamCodec(ConnectCodec):
     wrap_message = staticmethod(protocol.wrap_message_connect)
     unwrap_message = staticmethod(protocol.unwrap_message_stream_connect)
 
+    def end_response(self):
+        trailer_dict = {}
+        for name, value in trailers:
+            trailer_dict.setdefault(name, []).append(value)
+        trailer_message = json.dumps({"metadata": trailer_dict}).encode()
+        trailer_data = self.wrap_message(True, False, trailer_message)
+        for name, value in context._trailing_metadata:
+            if name.lower() == "grpc-status-details-bin":
+                # TODO: it's annoying to have to round trip this
+                from google.rpc import status_pb2
+
+                binvalue = protocol.b64decode(value)
+                status_details = status_pb2.Status()
+                status_details.ParseFromString(binvalue)
+                error["details"] = [
+                    {
+                        "type": d.type_url.rpartition("/")[2],
+                        "value": protocol.b64encode(d.value),
+                    }
+                    for d in status_details.details
+                ]
+            elif connect_stream:
+                trailers.setdefault(name, []).append(value)
+            else:
+                headers.append((name, value))
+
 
 class ConnectStreamJsonCodec(ConnectStreamCodec):
     @property
@@ -347,9 +514,10 @@ class ConnectStreamProtoCodec(ConnectStreamCodec):
 def get_encoding(encoding: str | None) -> Encoding:
     if encoding is None or encoding.lower() == "identity":
         return IdentityEncoding()
-    raise protocol.WebRpcError(
-        code=grpc.StatusCode.UNIMPLEMENTED, details=f"Unsupported encoding: {encoding}"
-    )
+    return InvalidEncoding()
+    # raise protocol.WebRpcError(
+    #     code=grpc.StatusCode.UNIMPLEMENTED, details=f"Unsupported encoding: {encoding}"
+    # )
 
 
 _CODECS = [

@@ -196,6 +196,10 @@ class InvalidContentType(ProtocolError):
     pass
 
 
+class InvalidEncoding(ProtocolError):
+    pass
+
+
 def decode_identity(compressed, message):
     if compressed:
         raise ProtocolError("Cannot decode compressed message with `identity` encoder")
@@ -357,6 +361,7 @@ _STATUS_CODE_NAME_MAP = {
 }
 # ConnectRPC uses a different name.
 _STATUS_CODE_NAME_MAP["canceled"] = grpc.StatusCode.CANCELLED
+_NAME_CODE_MAP = {value: key for key, value in _STATUS_CODE_NAME_MAP.items()}
 
 
 def status_code_to_http(status_code):
@@ -369,6 +374,10 @@ def http_status_to_status_code(status: int) -> grpc.StatusCode:
 
 def named_status_to_code(name: str) -> grpc.StatusCode:
     return _STATUS_CODE_NAME_MAP.get(name, grpc.StatusCode.UNKNOWN)
+
+
+def code_to_named_status(code: grpc.StatusCode) -> str:
+    return _NAME_CODE_MAP.get(code, "unknown")
 
 
 class WebRpcError(grpc.RpcError):

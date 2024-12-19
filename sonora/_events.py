@@ -1,17 +1,18 @@
-class Event:
-    """Base class for protocol events"""
-
-    pass
+import typing
 
 
-class RequestReceived(Event):
-    def __init__(self) -> None:
-        self.headers = None
+class StartResponse(typing.NamedTuple):
+    status_code: int
+    phrase: str
+    headers: typing.Iterable[tuple[bytes, bytes]]
 
 
-class ResponseReceived(Event):
-    def __init__(self) -> None:
-        self.headers = None
+class SendBody(typing.NamedTuple):
+    body: bytes
 
 
-# class
+class SendTrailers(typing.NamedTuple):
+    trailers: typing.Iterable[tuple[bytes, bytes]]
+
+
+ServerEvents = typing.Iterable[StartResponse | SendBody | SendTrailers]
