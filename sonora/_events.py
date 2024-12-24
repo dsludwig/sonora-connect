@@ -17,4 +17,10 @@ class SendTrailers(typing.NamedTuple):
     trailers: typing.Iterable[tuple[str, str]]
 
 
+class StartRequest(typing.NamedTuple):
+    method: str
+    headers: typing.Iterable[tuple[str, str]]
+
+
+ClientEvents = typing.Iterable[StartRequest | SendBody]
 ServerEvents = typing.Iterable[StartResponse | SendBody | SendTrailers]

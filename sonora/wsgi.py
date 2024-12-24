@@ -6,7 +6,7 @@ from collections import namedtuple
 import grpc
 
 from sonora import _events, protocol
-from sonora._encoder import Codec, get_codec
+from sonora._codec import Codec, get_codec
 from sonora.metadata import Metadata
 
 _HandlerCallDetails = namedtuple(

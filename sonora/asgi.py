@@ -9,7 +9,7 @@ import grpc
 from async_timeout import timeout
 
 from sonora import _events, protocol
-from sonora._encoder import Codec, get_codec
+from sonora._codec import Codec, get_codec
 from sonora.metadata import Metadata
 
 _HandlerCallDetails = namedtuple(

@@ -11,7 +11,15 @@ from google.protobuf.message import Message
 from google.rpc import status_pb2
 
 from sonora import protocol
-from sonora._events import SendBody, SendTrailers, ServerEvents, StartResponse
+from sonora._encoding import Encoding, get_encoding
+from sonora._events import (
+    ClientEvents,
+    SendBody,
+    SendTrailers,
+    ServerEvents,
+    StartRequest,
+    StartResponse,
+)
 from sonora.metadata import Metadata
 
 Deserializer = typing.Callable[[bytes], Message]
@@ -30,42 +38,6 @@ class RpcOperation(typing.NamedTuple):
     response_streaming: bool
     request_serializer: Serializer | None
     response_deserializer: Deserializer | None
-
-
-class Encoding:
-    @abc.abstractmethod
-    def decode(self, compressed: bool, message: bytes) -> bool: ...
-
-    @abc.abstractmethod
-    def encode(self, message: bytes) -> bytes: ...
-
-
-class IdentityEncoding(Encoding):
-    def decode(self, compressed: bool, message: bytes) -> bytes:
-        if compressed:
-            raise protocol.ProtocolError(
-                "Cannot decode compressed message with `identity` encoder"
-            )
-        return message
-
-    def encode(self, message: bytes) -> bytes:
-        return message
-
-
-class InvalidEncoding(Encoding):
-    def decode(self, compressed, message):
-        raise protocol.InvalidEncoding("cannot decode with unsupported encoder")
-
-    def encode(self, message):
-        raise protocol.InvalidEncoding("cannot encode with unsupported encoder")
-
-
-class Base64Encoding(Encoding):
-    def decode(self, _compressed, message):
-        return protocol.b64decode(message)
-
-    def encode(self, message):
-        return protocol.b64encode(message)
 
 
 def _transform(
@@ -173,10 +145,16 @@ class Codec:
         self._invocation_metadata = metadata
 
     @abc.abstractmethod
-    def send_request(self, request: Message) -> ServerEvents: ...
+    def send_request(self, request: Message) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def end_request(self) -> ServerEvents: ...
+    def start_request(self) -> ClientEvents: ...
+
+    @abc.abstractmethod
+    def end_request(self) -> ClientEvents: ...
+
+    @abc.abstractmethod
+    def start_response(self, response: StartResponse) -> ClientEvents: ...
 
     @abc.abstractmethod
     def send_response(self, response: Message) -> ServerEvents: ...
@@ -408,6 +386,9 @@ class GrpcWebTextCodec(GrpcWebProtoCodec):
 
 
 class ConnectCodec(GrpcCodec):
+    def __init__(self, encoding, serializer):
+        super().__init__(encoding, serializer)
+
     @property
     def requires_trailers(self):
         return False
@@ -444,6 +425,56 @@ class ConnectCodec(GrpcCodec):
                 ]
         return error
 
+    def start_response(self, response):
+        initial_metadata, trailing_metadata = protocol.split_trailers(
+            protocol.Metadata(response.headers)
+        )
+        code = protocol.http_status_to_status_code(response.status_code)
+        self.set_code(code)
+        self.set_initial_metadata(initial_metadata)
+        self.set_trailing_metadata(trailing_metadata)
+
+        content_type = self._initial_metadata.get("content-type")
+        # TODO: other compatible subtypes should be permitted
+        if content_type == self.content_type and code == grpc.StatusCode.OK:
+            return
+
+        if content_type == "application/json":
+            return
+
+        #     data = json.loads(self._response.data)
+        #     protocol.unpack_error_connect(
+        #         data, initial_metadata, trailing_metadata, code
+        #     )
+
+        # Unexpected content type
+        raise protocol.WebRpcError(
+            code,
+            "Unexpected content-type",
+            initial_metadata=self._initial_metadata,
+            trailing_metadata=self._trailing_metadata,
+        )
+
+        # try:
+        #     data = json.loads(self._response.data)
+        #     protocol.unpack_error_connect(
+        #         data,
+        #         initial_metadata,
+        #         trailing_metadata,
+        #         status_code=protocol.http_status_to_status_code(
+        #             self._response.status
+        #         ),
+        #     )
+        # except ValueError:
+        #     pass
+        # raise protocol.WebRpcError(
+        #     protocol.http_status_to_status_code(self._response.status),
+        #     self._response.reason,
+        #     initial_metadata=[
+        #         (key, value) for key, value in self._response.headers.items()
+        #     ],
+        # )
+
 
 class ConnectUnaryCodec(ConnectCodec):
     def __init__(self, encoding, serializer):
@@ -454,6 +485,28 @@ class ConnectUnaryCodec(ConnectCodec):
     wrap_message = staticmethod(protocol.bare_wrap_message)
     unwrap_message_stream = staticmethod(protocol.bare_unwrap_message_stream)
     unwrap_message_asgi = staticmethod(protocol.bare_unwrap_message_asgi)
+
+    def send_request(self, request):
+        self._request = request
+        return tuple()
+
+    def start_request(self):
+        if self._request:
+            body = self.serializer.serialize_request(self._request)
+        else:
+            body = b""
+
+        yield StartRequest(
+            "POST",
+            headers=itertools.chain(
+                (
+                    ("content-type", self.content_type),
+                    ("content-length", str(len(body))),
+                ),
+                self._invocation_metadata,
+            ),
+        )
+        yield SendBody(body, more_body=False)
 
     def send_response(self, response):
         self._response = response
@@ -567,12 +620,6 @@ class ConnectStreamProtoCodec(ConnectStreamCodec):
     @property
     def content_type(self):
         return "application/connect+proto"
-
-
-def get_encoding(encoding: str | None) -> Encoding:
-    if encoding is None or encoding.lower() == "identity":
-        return IdentityEncoding()
-    return InvalidEncoding()
 
 
 _CODECS = [
