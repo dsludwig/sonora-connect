@@ -22,5 +22,23 @@ class StartRequest(typing.NamedTuple):
     headers: typing.Iterable[tuple[str, str]]
 
 
-ClientEvents = typing.Iterable[StartRequest | SendBody]
+class ReceiveInitialMetadata(typing.NamedTuple):
+    headers: typing.Iterable[tuple[str, str | bytes]]
+
+
+class ReceiveTrailingMetadata(typing.NamedTuple):
+    headers: typing.Iterable[tuple[str, str | bytes]]
+
+
+class ReceiveMessage(typing.NamedTuple):
+    message: typing.Any
+
+
+ClientEvents = typing.Iterable[
+    StartRequest
+    | SendBody
+    | ReceiveInitialMetadata
+    | ReceiveMessage
+    | ReceiveTrailingMetadata
+]
 ServerEvents = typing.Iterable[StartResponse | SendBody | SendTrailers]

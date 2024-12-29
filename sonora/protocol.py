@@ -267,8 +267,8 @@ def unpack_error_connect(
     code = error.get("code")
     if code is not None and code in _STATUS_CODE_NAME_MAP:
         status_code = named_status_to_code(error.get("code"))
-    if status_code is None:
-        status_code = grpc.StatusCode.UNKNOWN
+    if status_code is None or status_code == grpc.StatusCode.OK:
+        status_code = grpc.StatusCode.INTERNAL
 
     status = status_pb2.Status(
         code=status_code.value[0],
@@ -344,6 +344,7 @@ _STATUS_CODE_MAP = {
     grpc.StatusCode.UNAUTHENTICATED: 401,
 }
 _STATUS_CODE_HTTP_MAP = {
+    200: grpc.StatusCode.OK,
     400: grpc.StatusCode.INTERNAL,
     401: grpc.StatusCode.UNAUTHENTICATED,
     403: grpc.StatusCode.PERMISSION_DENIED,

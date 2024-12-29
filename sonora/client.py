@@ -10,6 +10,7 @@ import urllib3.exceptions
 from urllib3._collections import HTTPHeaderDict
 
 from sonora import _codec, _encoding, _events, protocol
+from sonora.metadata import Metadata
 
 
 def insecure_web_channel(url, pool_manager_kws=None):
@@ -104,10 +105,12 @@ class Multicallable:
         self._connect = connect
         self._json = json
         self._codec = self._make_codec(request_serializer, response_deserializer)
-        self._metadata = [
-            ("content-type", self._codec.content_type),
-            ("x-user-agent", "grpc-web-python/0.1"),
-        ]
+        self._metadata = Metadata(
+            [
+                # ("content-type", self._codec.content_type),
+                ("x-user-agent", "grpc-web-python/0.1"),
+            ]
+        )
 
         # if connect:
         #     self._metadata = [
@@ -186,7 +189,7 @@ class UnaryUnaryMulticallable(Multicallable):
     def with_call(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
-            call_metadata.extend(protocol.encode_headers(metadata))
+            call_metadata.extend((metadata))
 
         call = UnaryUnaryCall(
             request,
@@ -349,6 +352,7 @@ class Call:
         # self._expected_content_types = expected_content_types
         self._response = None
         self._trailers = None
+        self._message = None
         # self._body = body_generator()
         # self._body.send(None)
         # self._connect = connect
@@ -368,11 +372,13 @@ class Call:
                     event.method,
                     self._url,
                     body=self._body,
-                    headers=event.headers,
+                    headers=HTTPHeaderDict(event.headers),
                     timeout=self._timeout,
                 )
             elif isinstance(event, _events.SendBody):
                 pass
+            elif isinstance(event, _events.ReceiveMessage):
+                self._message = event.message
             else:
                 raise ValueError("Unexpected codec event")
 
@@ -448,131 +454,27 @@ class UnaryUnaryCall(Call):
     @Call._raise_timeout(urllib3.exceptions.TimeoutError)
     def __call__(self):
         def do_call():
+            self._codec.set_invocation_metadata(self._metadata)
+            self._codec.set_timeout(self._timeout)
+
             yield from self._codec.send_request(self._request)
             yield from self._codec.start_request()
             yield from self._codec.start_response(
                 _events.StartResponse(
                     status_code=self._response.status,
                     phrase=self._response.reason,
-                    headers=self._response.headers.items(),
+                    headers=HTTPHeaderDict(self._response.headers),
                 )
             )
-            return ""
+            yield from self._codec.receive_body(self._response.data)
+
+            # TODO: event?
+            self._trailers = self._codec._trailing_metadata
 
         body_events, events = itertools.tee(do_call())
         self._body = body_generator(body_events)
         self._do_events(events)
-
-        # self._body = (
-        #     event.body
-        #     for event in self._do_events(
-        #         itertools.chain(
-        #             self._codec.send_request(self._request), self._codec.start_request()
-        #         )
-        #     )
-        #     if isinstance(event, _events.SendBody)
-        # )
-
-        # self._response = self._session.request(
-        #     "POST",
-        #     self._url,
-        #     body=self._codec.wrap_message(
-        #         False, False, self._codec.serializer.serialize_request(self._request)
-        #     ),
-        #     headers=HTTPHeaderDict(self._metadata),
-        #     timeout=self._timeout,
-        # )
-
-        # if self._response.status != 200 and "grpc-status" not in self._response.headers:
-        #     if self._connect:
-        #         initial_metadata, trailing_metadata = protocol.split_trailers(
-        #             protocol.Metadata(self._response.headers.items())
-        #         )
-        #         try:
-        #             data = json.loads(self._response.data)
-        #             protocol.unpack_error_connect(
-        #                 data,
-        #                 initial_metadata,
-        #                 trailing_metadata,
-        #                 status_code=protocol.http_status_to_status_code(
-        #                     self._response.status
-        #                 ),
-        #             )
-        #         except ValueError:
-        #             pass
-        #     raise protocol.WebRpcError(
-        #         protocol.http_status_to_status_code(self._response.status),
-        #         self._response.reason,
-        #         initial_metadata=[
-        #             (key, value) for key, value in self._response.headers.items()
-        #         ],
-        #     )
-
-        # buffer = io.BytesIO(self._response.data)
-
-        # messages = self._codec.unwrap_message_stream(buffer)
-        # result = None
-
-        # try:
-        #     trailers, compressed, message = next(messages)
-        # except StopIteration:
-        #     protocol.raise_for_status(
-        #         self._response.headers,
-        #         # expected_content_types=self._expected_content_types,
-        #     )
-        #     raise protocol.WebRpcError(
-        #         grpc.StatusCode.UNIMPLEMENTED,
-        #         "Missing response for unary call",
-        #     )
-
-        # if trailers:
-        #     self._trailers = self._codec.unpack_trailers(
-        #         message, self.initial_metadata()
-        #     )
-        # elif compressed:
-        #     raise protocol.WebRpcError(
-        #         grpc.StatusCode.INTERNAL, "Unexpected compression"
-        #     )
-        # else:
-        #     try:
-        #         result = self._codec.serializer.deserialize_response(message)
-        #     except Exception:
-        #         raise protocol.WebRpcError(
-        #             grpc.StatusCode.INTERNAL, "Could not decode response"
-        #         )
-
-        # try:
-        #     trailers, _, message = next(messages)
-        # except StopIteration:
-        #     pass
-        # else:
-        #     if trailers:
-        #         self._trailers = self._codec.unpack_trailers(
-        #             message, self.initial_metadata()
-        #         )
-        #     else:
-        #         raise protocol.WebRpcError(
-        #             grpc.StatusCode.UNIMPLEMENTED,
-        #             "UnaryUnary should only return a single message",
-        #         )
-
-        # protocol.raise_for_status(
-        #     self._response.headers,
-        #     self._trailers,  # , self._expected_content_types
-        # )
-
-        # if result is None:
-        #     raise protocol.WebRpcError(
-        #         grpc.StatusCode.UNIMPLEMENTED,
-        #         "Missing response for unary call",
-        #     )
-
-        # # if self._connect:
-        # #     _, self._trailers = protocol.split_trailers(
-        # #         protocol.Metadata(self._response.headers.items())
-        # #     )
-
-        # return result
+        return self._message
 
 
 class UnaryStreamCall(Call):

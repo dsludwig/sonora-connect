@@ -14,6 +14,7 @@ from sonora import protocol
 from sonora._encoding import Encoding, get_encoding
 from sonora._events import (
     ClientEvents,
+    ReceiveMessage,
     SendBody,
     SendTrailers,
     ServerEvents,
@@ -114,6 +115,7 @@ class Codec:
         self._initial_metadata = Metadata()
         self._trailing_metadata = Metadata()
         self._invocation_metadata = Metadata()
+        self._timeout = None
         self._code = grpc.StatusCode.OK
         self._details = None
 
@@ -144,6 +146,9 @@ class Codec:
     def set_invocation_metadata(self, metadata: Metadata):
         self._invocation_metadata = metadata
 
+    def set_timeout(self, timeout: float):
+        self._timeout = timeout
+
     @abc.abstractmethod
     def send_request(self, request: Message) -> ClientEvents: ...
 
@@ -155,6 +160,9 @@ class Codec:
 
     @abc.abstractmethod
     def start_response(self, response: StartResponse) -> ClientEvents: ...
+
+    @abc.abstractmethod
+    def receive_body(self, body: bytes) -> ClientEvents: ...
 
     @abc.abstractmethod
     def send_response(self, response: Message) -> ServerEvents: ...
@@ -435,45 +443,63 @@ class ConnectCodec(GrpcCodec):
         self.set_trailing_metadata(trailing_metadata)
 
         content_type = self._initial_metadata.get("content-type")
+        encoding = self._initial_metadata.get("content-encoding", "identity")
+        message = response.phrase
         # TODO: other compatible subtypes should be permitted
-        if content_type == self.content_type and code == grpc.StatusCode.OK:
-            return
-
-        if content_type == "application/json":
-            return
-
-        #     data = json.loads(self._response.data)
-        #     protocol.unpack_error_connect(
-        #         data, initial_metadata, trailing_metadata, code
-        #     )
+        if (
+            content_type != self.content_type
+            and content_type != "application/json"
+            and content_type is not None
+        ):
+            code = grpc.StatusCode.UNKNOWN
+            message = "Unexpected content-type"
+        elif encoding != self.encoding.encoding:
+            code = grpc.StatusCode.INTERNAL
+            message = "Unexpected encoding"
+        elif content_type is None:
+            pass
+        else:
+            return tuple()
 
         # Unexpected content type
+        if code == grpc.StatusCode.OK:
+            code = grpc.StatusCode.UNKNOWN
         raise protocol.WebRpcError(
             code,
-            "Unexpected content-type",
+            message,
             initial_metadata=self._initial_metadata,
             trailing_metadata=self._trailing_metadata,
         )
 
-        # try:
-        #     data = json.loads(self._response.data)
-        #     protocol.unpack_error_connect(
-        #         data,
-        #         initial_metadata,
-        #         trailing_metadata,
-        #         status_code=protocol.http_status_to_status_code(
-        #             self._response.status
-        #         ),
-        #     )
-        # except ValueError:
-        #     pass
-        # raise protocol.WebRpcError(
-        #     protocol.http_status_to_status_code(self._response.status),
-        #     self._response.reason,
-        #     initial_metadata=[
-        #         (key, value) for key, value in self._response.headers.items()
-        #     ],
-        # )
+    def receive_body(self, body):
+        if self._code != grpc.StatusCode.OK:
+            try:
+                data = json.loads(body)
+                protocol.unpack_error_connect(
+                    data, self._initial_metadata, self._trailing_metadata, self._code
+                )
+            except ValueError:
+                pass
+            raise protocol.WebRpcError(
+                code=self._code,
+                details="Invalid error response",
+                initial_metadata=self._initial_metadata,
+                trailing_metadata=self._trailing_metadata,
+            )
+
+        _, compressed, body = self.unwrap_message(body)
+        body = self.encoding.decode(compressed, body)
+        try:
+            message = self.serializer.deserialize_response(body)
+        except Exception:
+            raise protocol.WebRpcError(
+                code=grpc.StatusCode.INTERNAL,
+                details="Could not decode response",
+                initial_metadata=self._initial_metadata,
+                trailing_metadata=self._trailing_metadata,
+            )
+
+        yield ReceiveMessage(message=message)
 
 
 class ConnectUnaryCodec(ConnectCodec):
@@ -485,6 +511,9 @@ class ConnectUnaryCodec(ConnectCodec):
     wrap_message = staticmethod(protocol.bare_wrap_message)
     unwrap_message_stream = staticmethod(protocol.bare_unwrap_message_stream)
     unwrap_message_asgi = staticmethod(protocol.bare_unwrap_message_asgi)
+
+    def unwrap_message(self, body):
+        return False, False, body
 
     def send_request(self, request):
         self._request = request
@@ -498,12 +527,17 @@ class ConnectUnaryCodec(ConnectCodec):
 
         yield StartRequest(
             "POST",
-            headers=itertools.chain(
-                (
-                    ("content-type", self.content_type),
-                    ("content-length", str(len(body))),
-                ),
-                self._invocation_metadata,
+            headers=protocol.encode_headers(
+                itertools.chain(
+                    (
+                        ("content-type", self.content_type),
+                        ("content-length", str(len(body))),
+                    ),
+                    ()
+                    if self._timeout is None
+                    else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
+                    self._invocation_metadata,
+                )
             ),
         )
         yield SendBody(body, more_body=False)

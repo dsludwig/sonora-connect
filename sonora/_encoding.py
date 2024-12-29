@@ -4,6 +4,10 @@ from sonora import protocol
 
 
 class Encoding:
+    @property
+    @abc.abstractmethod
+    def encoding(self) -> str: ...
+
     @abc.abstractmethod
     def decode(self, compressed: bool, message: bytes) -> bool: ...
 
@@ -12,6 +16,10 @@ class Encoding:
 
 
 class IdentityEncoding(Encoding):
+    @property
+    def encoding(self):
+        return "identity"
+
     def decode(self, compressed: bool, message: bytes) -> bytes:
         if compressed:
             raise protocol.ProtocolError(
@@ -24,6 +32,10 @@ class IdentityEncoding(Encoding):
 
 
 class InvalidEncoding(Encoding):
+    @property
+    def encoding(self):
+        return "<invalid>"
+
     def decode(self, compressed, message):
         raise protocol.InvalidEncoding("cannot decode with unsupported encoder")
 
