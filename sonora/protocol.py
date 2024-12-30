@@ -302,7 +302,12 @@ def unpack_trailers_connect(response, initial_metadata):
         trailing_metadata = Metadata(response["metadata"])
     if "error" in response:
         error = response["error"]
-        unpack_error_connect(error, initial_metadata, trailing_metadata)
+        unpack_error_connect(
+            error,
+            initial_metadata,
+            trailing_metadata,
+            status_code=grpc.StatusCode.UNKNOWN,
+        )
 
     return trailing_metadata
 

@@ -458,9 +458,13 @@ class ConnectCodec(GrpcCodec):
         ):
             code = grpc.StatusCode.UNKNOWN
             message = "Unexpected content-type"
+            self.set_code(code)
+            self.set_details(message)
         elif encoding != self.encoding.encoding:
             code = grpc.StatusCode.INTERNAL
             message = "Unexpected encoding"
+            self.set_code(code)
+            self.set_details(message)
         elif content_type is None:
             pass
         else:

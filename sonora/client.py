@@ -255,14 +255,15 @@ class UnaryStreamMulticallable(Multicallable):
             call_metadata,
             self._rpc_url,
             self._session,
-            self._serializer,
-            self._deserializer,
-            self._wrap_message,
-            self._unwrap_message_stream,
-            self._unpack_trailers,
-            self._raise_for_status,
-            self._connect,
-            self._expected_content_types,
+            self._codec,
+            # self._serializer,
+            # self._deserializer,
+            # self._wrap_message,
+            # self._unwrap_message_stream,
+            # self._unpack_trailers,
+            # self._raise_for_status,
+            # self._connect,
+            # self._expected_content_types,
         )
 
 
@@ -533,39 +534,37 @@ class UnaryStreamCall(Call):
 
     @Call._raise_timeout(urllib3.exceptions.TimeoutError)
     def __iter__(self):
-        self._response = self._session.request(
-            "POST",
-            self._url,
-            body=self._wrap_message(False, False, self._serializer(self._request)),
-            headers=HTTPHeaderDict(self._metadata),
-            timeout=self._timeout,
-            preload_content=False,
-        )
-        self._response.auto_close = False
+        self._body = body_generator(self._codec.send_request(self._request))
 
-        stream = io.BufferedReader(self._response, buffer_size=16384)
+        def do_call():
+            self._codec.set_invocation_metadata(self._metadata)
+            self._codec.set_timeout(self._timeout)
 
-        for trailers, compressed, message in self._unwrap_message_stream(stream):
-            if compressed:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.INTERNAL, "Unexpected compression"
+            yield from self._codec.start_request()
+            yield from self._codec.start_response(
+                _events.StartResponse(
+                    status_code=self._response.status,
+                    phrase=self._response.reason,
+                    headers=HTTPHeaderDict(self._response.headers),
                 )
-            if trailers:
-                self._trailers = self._unpack_trailers(message, self.initial_metadata())
-                break
-            else:
-                try:
-                    yield self._deserializer(message)
-                except Exception:
-                    raise protocol.WebRpcError(
-                        grpc.StatusCode.INTERNAL, "Could not decode response"
-                    )
+            )
+            yield from self._codec.receive_body(self._response.data)
 
-        self._response.release_conn()
+            # TODO: event?
+            self._trailers = self._codec._trailing_metadata
 
-        self._raise_for_status(
-            self._response.headers, self._trailers, self._expected_content_types
-        )
+        try:
+            for event in do_call():
+                if isinstance(event, _events.ReceiveMessage):
+                    yield event.message
+                else:
+                    self._do_event(event)
+        except protocol.ProtocolError:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.INTERNAL, "Unexpected compression"
+            )
+        finally:
+            self._response.release_conn()
 
     def __del__(self):
         if self._response and self._response.connection:
@@ -577,19 +576,7 @@ class StreamUnaryCall(Call):
     response_streaming = False
 
     def _do_event(self, event):
-        if isinstance(event, _events.StartRequest):
-            self._response = self._session.request(
-                event.method,
-                self._url,
-                body=self._body,
-                headers=HTTPHeaderDict(event.headers),
-                timeout=self._timeout,
-                preload_content=not self.response_streaming,
-                chunked=self.request_streaming or self.response_streaming,
-            )
-        elif isinstance(event, _events.SendBody):
-            pass
-        elif isinstance(event, _events.ReceiveMessage):
+        if isinstance(event, _events.ReceiveMessage):
             if self._message is None:
                 self._message = event.message
             else:
@@ -598,7 +585,7 @@ class StreamUnaryCall(Call):
                     "Received multiple responses for a stream-unary call",
                 )
         else:
-            raise ValueError("Unexpected codec event")
+            super()._do_event(event)
 
     @Call._raise_timeout(urllib3.exceptions.TimeoutError)
     def __call__(self):
