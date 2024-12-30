@@ -180,7 +180,7 @@ class Codec:
             + message
         )
 
-    def unwrap_message(self, message: bytes) -> tuple[bool, bool, bytes]:
+    def unwrap_message(self, message: bytes) -> tuple[bool, bool, bytes, bytes]:
         if len(message) < protocol._HEADER_LENGTH:
             raise ValueError()
         flags, length = struct.unpack(
@@ -192,7 +192,7 @@ class Codec:
             raise ValueError()
 
         trailers, compressed = self.unpack_header_flags(flags)
-        return trailers, compressed, data
+        return trailers, compressed, data, message[protocol._HEADER_LENGTH + length :]
 
     def unwrap_message_stream(
         self, stream
@@ -293,6 +293,11 @@ class GrpcCodec(Codec):
             )
             + message
         )
+
+    def send_request(self, request):
+        body = self.serializer.serialize_request(request)
+        body = self.wrap_message(False, False, body)
+        yield SendBody(body)
 
     def _start(self):
         if self._started:
@@ -487,19 +492,28 @@ class ConnectCodec(GrpcCodec):
                 trailing_metadata=self._trailing_metadata,
             )
 
-        _, compressed, body = self.unwrap_message(body)
-        body = self.encoding.decode(compressed, body)
-        try:
-            message = self.serializer.deserialize_response(body)
-        except Exception:
-            raise protocol.WebRpcError(
-                code=grpc.StatusCode.INTERNAL,
-                details="Could not decode response",
-                initial_metadata=self._initial_metadata,
-                trailing_metadata=self._trailing_metadata,
-            )
+        rest = body
+        while rest:
+            trailers, compressed, body, rest = self.unwrap_message(rest)
+            if trailers:
+                trailing_metadata = protocol.unpack_trailers_connect(
+                    body, self._initial_metadata
+                )
+                self.set_trailing_metadata(trailing_metadata)
+                return tuple()
 
-        yield ReceiveMessage(message=message)
+            body = self.encoding.decode(compressed, body)
+            try:
+                message = self.serializer.deserialize_response(body)
+            except Exception:
+                raise protocol.WebRpcError(
+                    code=grpc.StatusCode.INTERNAL,
+                    details="Could not decode response",
+                    initial_metadata=self._initial_metadata,
+                    trailing_metadata=self._trailing_metadata,
+                )
+
+            yield ReceiveMessage(message=message)
 
 
 class ConnectUnaryCodec(ConnectCodec):
@@ -513,7 +527,7 @@ class ConnectUnaryCodec(ConnectCodec):
     unwrap_message_asgi = staticmethod(protocol.bare_unwrap_message_asgi)
 
     def unwrap_message(self, body):
-        return False, False, body
+        return False, False, body, b""
 
     def send_request(self, request):
         self._request = request
@@ -605,6 +619,14 @@ class ConnectUnaryCodec(ConnectCodec):
         yield StartResponse(200, "OK", headers)
         yield SendBody(body, more_body=False)
 
+    def receive_body(self, body):
+        if self._code == grpc.StatusCode.OK and not body:
+            # an empty response is valid.
+            message = self.serializer.deserialize_response(body)
+            yield ReceiveMessage(message=message)
+        else:
+            yield from super().receive_body(body)
+
 
 class ConnectUnaryJsonCodec(ConnectUnaryCodec):
     @property
@@ -625,6 +647,20 @@ class ConnectStreamCodec(ConnectCodec):
 
     wrap_message = staticmethod(protocol.wrap_message_connect)
     unwrap_message_stream = staticmethod(protocol.unwrap_message_stream_connect)
+
+    def start_request(self):
+        yield StartRequest(
+            "POST",
+            headers=protocol.encode_headers(
+                itertools.chain(
+                    (("content-type", self.content_type),),
+                    ()
+                    if self._timeout is None
+                    else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
+                    self._invocation_metadata,
+                )
+            ),
+        )
 
     def end_response(self):
         yield from self._start()
