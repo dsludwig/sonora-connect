@@ -1,6 +1,5 @@
 import functools
 import inspect
-import io
 import itertools
 from urllib.parse import urljoin
 
@@ -329,14 +328,15 @@ class StreamStreamMulticallable(Multicallable):
             call_metadata,
             self._rpc_url,
             self._session,
-            self._serializer,
-            self._deserializer,
-            self._wrap_message,
-            self._unwrap_message_stream,
-            self._unpack_trailers,
-            self._raise_for_status,
-            self._connect,
-            self._expected_content_types,
+            self._codec,
+            # self._serializer,
+            # self._deserializer,
+            # self._wrap_message,
+            # self._unwrap_message_stream,
+            # self._unpack_trailers,
+            # self._raise_for_status,
+            # self._connect,
+            # self._expected_content_types,
         )
 
 
@@ -631,34 +631,41 @@ class StreamStreamCall(Call):
 
     @Call._raise_timeout(urllib3.exceptions.TimeoutError)
     def __iter__(self):
-        self._response = self._session.request(
-            "POST",
-            self._url,
-            body=(
-                self._wrap_message(False, False, self._serializer(req))
-                for req in self._request
-            ),
-            headers=HTTPHeaderDict(self._metadata),
-            timeout=self._timeout,
-            preload_content=False,
-            chunked=True,
+        self._body = body_generator(
+            itertools.chain.from_iterable(
+                self._codec.send_request(request) for request in self._request
+            )
         )
-        self._response.auto_close = False
 
-        stream = io.BufferedReader(self._response, buffer_size=16384)
+        def do_call():
+            self._codec.set_invocation_metadata(self._metadata)
+            self._codec.set_timeout(self._timeout)
 
-        for trailers, _, message in self._unwrap_message_stream(stream):
-            if trailers:
-                self._trailers = self._unpack_trailers(message, self.initial_metadata())
-                break
-            else:
-                yield self._deserializer(message)
+            yield from self._codec.start_request()
+            yield from self._codec.start_response(
+                _events.StartResponse(
+                    status_code=self._response.status,
+                    phrase=self._response.reason,
+                    headers=HTTPHeaderDict(self._response.headers),
+                )
+            )
+            yield from self._codec.receive_body(self._response.data)
 
-        self._response.release_conn()
+            # TODO: event?
+            self._trailers = self._codec._trailing_metadata
 
-        self._raise_for_status(
-            self._response.headers, self._trailers, self._expected_content_types
-        )
+        try:
+            for event in do_call():
+                if isinstance(event, _events.ReceiveMessage):
+                    yield event.message
+                else:
+                    self._do_event(event)
+        except protocol.ProtocolError:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.INTERNAL, "Unexpected compression"
+            )
+        finally:
+            self._response.release_conn()
 
     def __del__(self):
         if self._response and self._response.connection:
