@@ -406,6 +406,7 @@ class WebRpcError(grpc.RpcError):
     def from_metadata(cls, trailers):
         status = int(trailers["grpc-status"])
         details = trailers.get("grpc-message")
+        details = unquote(details) if details else details
 
         code = cls._code_to_enum[status]
 

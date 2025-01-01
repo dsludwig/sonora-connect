@@ -269,7 +269,7 @@ class Call:
         elif isinstance(event, _events.SendBody):
             pass
         elif isinstance(event, _events.ReceiveMessage):
-            self._message = event.message
+            pass
         else:
             raise ValueError("Unexpected codec event")
 
@@ -349,6 +349,18 @@ class UnaryUnaryCall(Call):
     request_streaming = False
     response_streaming = False
 
+    def _do_event(self, event):
+        if isinstance(event, _events.ReceiveMessage):
+            if self._message is None:
+                self._message = event.message
+            else:
+                raise protocol.WebRpcError(
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "Received multiple responses for a stream-unary call",
+                )
+        else:
+            super()._do_event(event)
+
     @Call._raise_timeout(urllib3.exceptions.TimeoutError)
     def __call__(self):
         self._body = body_generator(self._codec.send_request(self._request))
@@ -366,11 +378,19 @@ class UnaryUnaryCall(Call):
                 )
             )
             yield from self._codec.receive_body(self._response.data)
+            yield from self._codec.end_request()
 
             # TODO: event?
             self._trailers = self._codec._trailing_metadata
 
         self._do_events(do_call())
+        if self._message is None:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "Missing response for unary-unary call",
+                initial_metadata=self._codec._initial_metadata,
+                trailing_metadata=self._codec._trailing_metadata,
+            )
         return self._message
 
 
@@ -395,6 +415,7 @@ class UnaryStreamCall(Call):
                 )
             )
             yield from self._codec.receive_body(self._response.data)
+            yield from self._codec.end_request()
 
             # TODO: event?
             self._trailers = self._codec._trailing_metadata
@@ -453,6 +474,7 @@ class StreamUnaryCall(Call):
             )
 
             yield from self._codec.receive_body(self._response.data)
+            yield from self._codec.end_request()
             # TODO: event?
             self._trailers = self._codec._trailing_metadata
 
@@ -498,6 +520,7 @@ class StreamStreamCall(Call):
             for chunk in self._response.stream():
                 yield from self._codec.receive_body(chunk)
 
+            yield from self._codec.end_request()
             # TODO: event?
             self._trailers = self._codec._trailing_metadata
 

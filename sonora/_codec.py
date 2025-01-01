@@ -124,6 +124,10 @@ class Codec:
     @abc.abstractmethod
     def content_type(self) -> str: ...
     @property
+    def accepted_content_types(self) -> tuple[str, ...]:
+        return (self.content_type,)
+
+    @property
     @abc.abstractmethod
     def requires_trailers(self) -> bool: ...
 
@@ -300,10 +304,114 @@ class GrpcCodec(Codec):
             + message
         )
 
+    def start_request(self):
+        yield StartRequest(
+            "POST",
+            headers=protocol.encode_headers(
+                itertools.chain(
+                    (("content-type", self.content_type),),
+                    ()
+                    if self._timeout is None
+                    else (
+                        (
+                            "grpc-timeout",
+                            protocol.serialize_timeout(self._timeout),
+                        ),
+                    ),
+                    self._invocation_metadata,
+                )
+            ),
+        )
+
     def send_request(self, request):
         body = self.serializer.serialize_request(request)
         body = self.wrap_message(False, False, body)
         yield SendBody(body)
+
+    def start_response(self, response):
+        initial_metadata = protocol.Metadata(response.headers)
+        self.set_initial_metadata(initial_metadata)
+        if response.status_code != 200:
+            code = protocol.http_status_to_status_code(response.status_code)
+            self.set_code(code)
+            self.set_details(response.phrase)
+            raise protocol.WebRpcError(
+                self._code,
+                self._details,
+                initial_metadata=self._initial_metadata,
+                trailing_metadata=self._trailing_metadata,
+            )
+
+        content_type = initial_metadata.get("content-type")
+        encoding = initial_metadata.get("grpc-encoding", "identity")
+        if content_type not in self.accepted_content_types and content_type is not None:
+            code = grpc.StatusCode.UNKNOWN
+            message = "Unexpected content-type"
+            self.set_code(code)
+            self.set_details(message)
+        elif encoding != self.encoding.encoding:
+            code = grpc.StatusCode.INTERNAL
+            message = "Unexpected encoding"
+            self.set_code(code)
+            self.set_details(message)
+        elif content_type is None:
+            pass
+        else:
+            return tuple()
+
+        # Unexpected content type
+        if code == grpc.StatusCode.OK:
+            code = grpc.StatusCode.UNKNOWN
+        raise protocol.WebRpcError(
+            code,
+            message,
+            initial_metadata=self._initial_metadata,
+            trailing_metadata=self._trailing_metadata,
+        )
+
+    def receive_body(self, body):
+        self._buffer.extend(body)
+        while self._buffer:
+            try:
+                trailers, compressed, body, self._buffer = self.unwrap_message(
+                    self._buffer
+                )
+            except ValueError:
+                return
+
+            if trailers:
+                trailing_metadata = Metadata(protocol.unpack_trailers(body))
+                self.set_trailing_metadata(trailing_metadata)
+                return
+
+            try:
+                body = self.encoding.decode(compressed, body)
+            except protocol.ProtocolError:
+                raise protocol.WebRpcError(
+                    code=grpc.StatusCode.INTERNAL,
+                    details="Could not decode response",
+                    initial_metadata=self._initial_metadata,
+                    trailing_metadata=self._trailing_metadata,
+                )
+            try:
+                message = self.serializer.deserialize_response(body)
+            except Exception:
+                raise protocol.WebRpcError(
+                    code=grpc.StatusCode.INTERNAL,
+                    details="Could not deserialize response",
+                    initial_metadata=self._initial_metadata,
+                    trailing_metadata=self._trailing_metadata,
+                )
+
+            yield ReceiveMessage(message=message)
+
+    def end_request(self):
+        protocol.raise_for_status(
+            self._initial_metadata,
+            self._trailing_metadata,
+            self.accepted_content_types,
+        )
+        return tuple()
 
     def _start(self):
         if self._started:
@@ -354,6 +462,10 @@ class GrpcProtoCodec(GrpcCodec):
     def content_type(self):
         return "application/grpc+proto"
 
+    @property
+    def accepted_content_types(self):
+        return ("application/grpc+proto", "application/grpc")
+
 
 class GrpcWebCodec(GrpcCodec):
     @property
@@ -387,6 +499,10 @@ class GrpcWebProtoCodec(GrpcWebCodec):
     @property
     def content_type(self):
         return "application/grpc-web+proto"
+
+    @property
+    def accepted_content_types(self):
+        return ("application/grpc-web+proto", "application/grpc-web")
 
 
 class GrpcWebTextCodec(GrpcWebProtoCodec):
@@ -544,6 +660,9 @@ class ConnectCodec(GrpcCodec):
                 )
 
             yield ReceiveMessage(message=message)
+
+    def end_request(self):
+        return tuple()
 
 
 class ConnectUnaryCodec(ConnectCodec):
