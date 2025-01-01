@@ -106,39 +106,12 @@ class Multicallable:
         self._codec = self._make_codec(request_serializer, response_deserializer)
         self._metadata = Metadata(
             [
-                # ("content-type", self._codec.content_type),
                 ("x-user-agent", "grpc-web-python/0.1"),
             ]
         )
 
-        # if connect:
-        #     self._metadata = [
-        #         ("x-user-agent", "grpc-web-python/0.1"),
-        #         ("content-type", "application/connect+proto"),
-        #     ]
-        #     self._expected_content_types = ["application/connect+proto"]
-        # else:
-        #     self._metadata = [
-        #         ("x-user-agent", "grpc-web-python/0.1"),
-        #         ("content-type", "application/grpc-web+proto"),
-        #     ]
-        #     self._expected_content_types = [
-        #         "application/grpc-web+proto",
-        #         "application/grpc-web",
-        #     ]
-
         self._serializer = request_serializer
         self._deserializer = response_deserializer
-        # if self._connect:
-        #     self._wrap_message = protocol.wrap_message_connect
-        #     self._unwrap_message_stream = protocol.unwrap_message_stream_connect
-        #     self._unpack_trailers = protocol.unpack_trailers_connect
-        #     self._raise_for_status = protocol.raise_for_status_connect
-        # else:
-        #     self._wrap_message = protocol.wrap_message
-        #     self._unwrap_message_stream = protocol.unwrap_message_stream
-        #     self._unpack_trailers = protocol.unpack_trailers
-        #     self._raise_for_status = protocol.raise_for_status
 
     def _make_codec(self, request_serializer, response_deserializer):
         if self._connect:
@@ -166,21 +139,6 @@ class Multicallable:
 
 
 class UnaryUnaryMulticallable(Multicallable):
-    # def __init__(
-    #     self, session, url, path, request_serializer, request_deserializer, connect, json
-    # ):
-    #     super().__init__(
-    #         session, url, path, request_serializer, request_deserializer, connect
-    #     )
-    # if self._connect:
-    #     self._wrap_message = protocol.bare_wrap_message
-    #     self._unwrap_message_stream = protocol.bare_unwrap_message_stream
-    #     self._metadata = [
-    #         ("x-user-agent", "grpc-web-python/0.1"),
-    #         ("content-type", "application/proto"),
-    #     ]
-    #     self._expected_content_types = ["application/proto"]
-
     def _make_codec(self, request_serializer, response_deserializer):
         if self._connect:
             codec_class = (
@@ -216,33 +174,12 @@ class UnaryUnaryMulticallable(Multicallable):
             self._rpc_url,
             self._session,
             self._codec,
-            # self._deserializer,
-            # self._wrap_message,
-            # self._unwrap_message_stream,
-            # self._unpack_trailers,
-            # self._raise_for_status,
-            # self._connect,
-            # self._expected_content_types,
         )
 
         return call(), call
 
 
 class UnaryStreamMulticallable(Multicallable):
-    # def __init__(
-    #     self, session, url, path, request_serializer, request_deserializer, connect
-    # ):
-    #     super().__init__(
-    #         session, url, path, request_serializer, request_deserializer, connect
-    #     )
-    #     if self._connect:
-    #         self._wrap_message = protocol.bare_wrap_message
-    #         self._unwrap_message_stream = protocol.bare_unwrap_message_stream
-    #         self._metadata = [
-    #             ("x-user-agent", "grpc-web-python/0.1"),
-    #             ("content-type", "application/connect+proto"),
-    #         ]
-
     def __call__(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
@@ -255,31 +192,10 @@ class UnaryStreamMulticallable(Multicallable):
             self._rpc_url,
             self._session,
             self._codec,
-            # self._serializer,
-            # self._deserializer,
-            # self._wrap_message,
-            # self._unwrap_message_stream,
-            # self._unpack_trailers,
-            # self._raise_for_status,
-            # self._connect,
-            # self._expected_content_types,
         )
 
 
 class StreamUnaryMulticallable(Multicallable):
-    # def __init__(
-    #     self, session, url, path, request_serializer, request_deserializer, connect
-    # ):
-    #     super().__init__(
-    #         session, url, path, request_serializer, request_deserializer, connect
-    #     )
-    #     if self._connect:
-    #         self._unwrap_message_stream = protocol.bare_unwrap_message_stream
-    #         self._metadata = [
-    #             ("x-user-agent", "grpc-web-python/0.1"),
-    #             ("content-type", "application/connect+proto"),
-    #         ]
-
     def __call__(self, request_iterator, timeout=None, metadata=None):
         resp, _call = self.with_call(request_iterator, timeout, metadata)
         return resp
@@ -296,27 +212,11 @@ class StreamUnaryMulticallable(Multicallable):
             self._rpc_url,
             self._session,
             self._codec,
-            # self._serializer,
-            # self._deserializer,
-            # self._wrap_message,
-            # self._unwrap_message_stream,
-            # self._unpack_trailers,
-            # self._raise_for_status,
-            # self._connect,
-            # self._expected_content_types,
         )
         return call(), call
 
 
 class StreamStreamMulticallable(Multicallable):
-    # def __init__(self, session, url, path, request_serializer, request_deserializer, connect):
-    #     super().__init__(session, url, path, request_serializer, request_deserializer, connect)
-    #     if self._connect:
-    #         self._metadata = [
-    #             ("x-user-agent", "grpc-web-python/0.1"),
-    #             ("content-type", "application/connect+proto"),
-    #         ]
-
     def __call__(self, request_iterator, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
@@ -329,14 +229,6 @@ class StreamStreamMulticallable(Multicallable):
             self._rpc_url,
             self._session,
             self._codec,
-            # self._serializer,
-            # self._deserializer,
-            # self._wrap_message,
-            # self._unwrap_message_stream,
-            # self._unpack_trailers,
-            # self._raise_for_status,
-            # self._connect,
-            # self._expected_content_types,
         )
 
 
@@ -352,14 +244,6 @@ class Call:
         url,
         session,
         codec: _codec.Codec,
-        # serializer,
-        # deserializer,
-        # wrap_message,
-        # unwrap_message_stream,
-        # unpack_trailers,
-        # raise_for_status,
-        # connect,
-        # expected_content_types,
     ):
         self._request = request
         self._timeout = timeout
@@ -367,27 +251,9 @@ class Call:
         self._url = url
         self._session = session
         self._codec = codec
-        # self._serializer = serializer
-        # self._deserializer = deserializer
-        # self._wrap_message = wrap_message
-        # self._unwrap_message_stream = unwrap_message_stream
-        # self._unpack_trailers = unpack_trailers
-        # self._raise_for_status = raise_for_status
-        # self._expected_content_types = expected_content_types
         self._response = None
         self._trailers = None
         self._message = None
-        # self._body = body_generator()
-        # self._body.send(None)
-        # self._connect = connect
-
-        # if timeout is not None:
-        #     if self._connect:
-        #         self._metadata.append(("connect-timeout-ms", str(int(timeout * 1000))))
-        #     else:
-        #         self._metadata.append(
-        #             ("grpc-timeout", protocol.serialize_timeout(timeout))
-        #         )
 
     def _do_event(self, event):
         if isinstance(event, _events.StartRequest):
@@ -410,25 +276,6 @@ class Call:
     def _do_events(self, events: _events.ClientEvents):
         for event in events:
             self._do_event(event)
-            # import sys
-
-            # print(event, file=sys.stderr)
-            # if isinstance(event, _events.StartRequest):
-            #     self._response = self._session.request(
-            #         event.method,
-            #         self._url,
-            #         body=self._body,
-            #         headers=HTTPHeaderDict(event.headers),
-            #         timeout=self._timeout,
-            #     )
-            # elif isinstance(event, _events.SendBody):
-            #     pass
-            # elif isinstance(event, _events.ReceiveMessage):
-            #     self._message = event.message
-            # else:
-            #     raise ValueError("Unexpected codec event")
-
-            # yield event
 
     def initial_metadata(self):
         return self._response.headers.items()
@@ -504,11 +351,12 @@ class UnaryUnaryCall(Call):
 
     @Call._raise_timeout(urllib3.exceptions.TimeoutError)
     def __call__(self):
+        self._body = body_generator(self._codec.send_request(self._request))
+
         def do_call():
             self._codec.set_invocation_metadata(self._metadata)
             self._codec.set_timeout(self._timeout)
 
-            yield from self._codec.send_request(self._request)
             yield from self._codec.start_request()
             yield from self._codec.start_response(
                 _events.StartResponse(
@@ -522,9 +370,7 @@ class UnaryUnaryCall(Call):
             # TODO: event?
             self._trailers = self._codec._trailing_metadata
 
-        body_events, events = itertools.tee(do_call())
-        self._body = body_generator(body_events)
-        self._do_events(events)
+        self._do_events(do_call())
         return self._message
 
 
@@ -649,7 +495,8 @@ class StreamStreamCall(Call):
                     headers=HTTPHeaderDict(self._response.headers),
                 )
             )
-            yield from self._codec.receive_body(self._response.data)
+            for chunk in self._response.stream():
+                yield from self._codec.receive_body(chunk)
 
             # TODO: event?
             self._trailers = self._codec._trailing_metadata

@@ -118,6 +118,7 @@ class Codec:
         self._timeout = None
         self._code = grpc.StatusCode.OK
         self._details = None
+        self._buffer = bytearray()
 
     @property
     @abc.abstractmethod
@@ -192,7 +193,12 @@ class Codec:
             raise ValueError()
 
         trailers, compressed = self.unpack_header_flags(flags)
-        return trailers, compressed, data, message[protocol._HEADER_LENGTH + length :]
+        return (
+            trailers,
+            compressed,
+            bytes(data),
+            message[protocol._HEADER_LENGTH + length :],
+        )
 
     def unwrap_message_stream(
         self, stream
@@ -438,6 +444,20 @@ class ConnectCodec(GrpcCodec):
                 ]
         return error
 
+    def start_request(self):
+        yield StartRequest(
+            "POST",
+            headers=protocol.encode_headers(
+                itertools.chain(
+                    (("content-type", self.content_type),),
+                    ()
+                    if self._timeout is None
+                    else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
+                    self._invocation_metadata,
+                )
+            ),
+        )
+
     def start_response(self, response):
         initial_metadata, trailing_metadata = protocol.split_trailers(
             protocol.Metadata(response.headers)
@@ -496,9 +516,15 @@ class ConnectCodec(GrpcCodec):
                 trailing_metadata=self._trailing_metadata,
             )
 
-        rest = body
-        while rest:
-            trailers, compressed, body, rest = self.unwrap_message(rest)
+        self._buffer.extend(body)
+        while self._buffer:
+            try:
+                trailers, compressed, body, self._buffer = self.unwrap_message(
+                    self._buffer
+                )
+            except ValueError:
+                return
+
             if trailers:
                 trailing_metadata = protocol.unpack_trailers_connect(
                     body, self._initial_metadata
@@ -531,34 +557,7 @@ class ConnectUnaryCodec(ConnectCodec):
     unwrap_message_asgi = staticmethod(protocol.bare_unwrap_message_asgi)
 
     def unwrap_message(self, body):
-        return False, False, body, b""
-
-    def send_request(self, request):
-        self._request = request
-        return tuple()
-
-    def start_request(self):
-        if self._request:
-            body = self.serializer.serialize_request(self._request)
-        else:
-            body = b""
-
-        yield StartRequest(
-            "POST",
-            headers=protocol.encode_headers(
-                itertools.chain(
-                    (
-                        ("content-type", self.content_type),
-                        ("content-length", str(len(body))),
-                    ),
-                    ()
-                    if self._timeout is None
-                    else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
-                    self._invocation_metadata,
-                )
-            ),
-        )
-        yield SendBody(body, more_body=False)
+        return False, False, bytes(body), bytearray()
 
     def send_response(self, response):
         self._response = response
@@ -651,20 +650,6 @@ class ConnectStreamCodec(ConnectCodec):
 
     wrap_message = staticmethod(protocol.wrap_message_connect)
     unwrap_message_stream = staticmethod(protocol.unwrap_message_stream_connect)
-
-    def start_request(self):
-        yield StartRequest(
-            "POST",
-            headers=protocol.encode_headers(
-                itertools.chain(
-                    (("content-type", self.content_type),),
-                    ()
-                    if self._timeout is None
-                    else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
-                    self._invocation_metadata,
-                )
-            ),
-        )
 
     def end_response(self):
         yield from self._start()
