@@ -170,6 +170,9 @@ class Codec:
     def receive_body(self, body: bytes) -> ClientEvents: ...
 
     @abc.abstractmethod
+    def server_receive_body(self, body: bytes, more_body: bool) -> ClientEvents: ...
+
+    @abc.abstractmethod
     def send_response(self, response: Message) -> ServerEvents: ...
 
     @abc.abstractmethod
@@ -178,7 +181,7 @@ class Codec:
     def wrap_message(self, trailers: bool, compressed: bool, message: bytes) -> bytes:
         return (
             struct.pack(
-                protocol._HEADER_FORMAT,
+                protocol.HEADER_FORMAT,
                 self.pack_header_flags(trailers, compressed),
                 len(message),
             )
@@ -186,12 +189,12 @@ class Codec:
         )
 
     def unwrap_message(self, message: bytes) -> tuple[bool, bool, bytes, bytes]:
-        if len(message) < protocol._HEADER_LENGTH:
+        if len(message) < protocol.HEADER_LENGTH:
             raise ValueError()
         flags, length = struct.unpack(
-            protocol._HEADER_FORMAT, message[: protocol._HEADER_LENGTH]
+            protocol.HEADER_FORMAT, message[: protocol.HEADER_LENGTH]
         )
-        data = message[protocol._HEADER_LENGTH : protocol._HEADER_LENGTH + length]
+        data = message[protocol.HEADER_LENGTH : protocol.HEADER_LENGTH + length]
 
         if length != len(data):
             raise ValueError()
@@ -201,16 +204,16 @@ class Codec:
             trailers,
             compressed,
             bytes(data),
-            message[protocol._HEADER_LENGTH + length :],
+            message[protocol.HEADER_LENGTH + length :],
         )
 
     def unwrap_message_stream(
         self, stream
     ) -> typing.Iterable[tuple[bool, bool, bytes]]:
-        data = stream.read(protocol._HEADER_LENGTH)
+        data = stream.read(protocol.HEADER_LENGTH)
 
         while data:
-            flags, length = struct.unpack(protocol._HEADER_FORMAT, data)
+            flags, length = struct.unpack(protocol.HEADER_FORMAT, data)
             trailers, compressed = self.unpack_header_flags(flags)
 
             body = stream.read(length)
@@ -219,61 +222,7 @@ class Codec:
             if trailers:
                 break
 
-            data = stream.read(protocol._HEADER_LENGTH)
-
-    async def unwrap_message_stream_async(
-        self, stream
-    ) -> typing.AsyncIterable[tuple[bool, bool, bytes]]:
-        data = await stream.readexactly(protocol._HEADER_LENGTH)
-
-        while data:
-            flags, length = struct.unpack(protocol._HEADER_FORMAT, data)
-            trailers, compressed = self.unpack_header_flags(flags)
-
-            body = await stream.readexactly(length)
-            yield trailers, compressed, body
-
-            if trailers:
-                break
-
-            data = await stream.readexactly(protocol._HEADER_LENGTH)
-
-    async def unwrap_message_asgi(
-        self, receive
-    ) -> typing.AsyncIterable[tuple[bool, bool, bytes]]:
-        buffer = bytearray()
-        waiting = False
-        flags = None
-        length = None
-
-        while True:
-            event = await receive()
-            assert event["type"].startswith("http.")
-
-            chunk = event["body"]
-
-            buffer += chunk
-
-            if len(buffer) >= protocol._HEADER_LENGTH:
-                if not waiting:
-                    flags, length = struct.unpack(
-                        protocol._HEADER_FORMAT, buffer[: protocol._HEADER_LENGTH]
-                    )
-
-                if len(buffer) >= protocol._HEADER_LENGTH + length:
-                    waiting = False
-                    data = buffer[
-                        protocol._HEADER_LENGTH : protocol._HEADER_LENGTH + length
-                    ]
-                    trailers, compressed = self.unpack_header_flags(flags)
-
-                    yield trailers, compressed, data
-                    buffer = buffer[protocol._HEADER_LENGTH + length :]
-                else:
-                    waiting = True
-
-            if not event.get("more_body"):
-                break
+            data = stream.read(protocol.HEADER_LENGTH)
 
 
 class GrpcCodec(Codec):
@@ -297,7 +246,7 @@ class GrpcCodec(Codec):
     def wrap_message(self, trailers, compressed, message):
         return (
             struct.pack(
-                protocol._HEADER_FORMAT,
+                protocol.HEADER_FORMAT,
                 self.pack_header_flags(trailers, compressed),
                 len(message),
             )
@@ -368,6 +317,26 @@ class GrpcCodec(Codec):
             initial_metadata=self._initial_metadata,
             trailing_metadata=self._trailing_metadata,
         )
+
+    def server_receive_body(self, body, more_body):
+        self._buffer.extend(body)
+        while self._buffer:
+            try:
+                trailers, compressed, body, self._buffer = self.unwrap_message(
+                    self._buffer
+                )
+            except ValueError:
+                return
+
+            if trailers:
+                trailing_metadata = Metadata(protocol.unpack_trailers(body))
+                self.set_trailing_metadata(trailing_metadata)
+                return
+
+            body = self.encoding.decode(compressed, body)
+            message = self.serializer.deserialize_request(body)
+
+            yield ReceiveMessage(message=message)
 
     def receive_body(self, body):
         self._buffer.extend(body)
@@ -682,9 +651,11 @@ class ConnectUnaryCodec(ConnectCodec):
         self._response = None
         self._request = None
 
-    wrap_message = staticmethod(protocol.bare_wrap_message)
-    unwrap_message_stream = staticmethod(protocol.bare_unwrap_message_stream)
-    unwrap_message_asgi = staticmethod(protocol.bare_unwrap_message_asgi)
+    def unwrap_message_stream(self, stream):
+        yield False, False, stream.read()
+
+    def wrap_message(self, _trailers, _compressed, message):
+        return message
 
     def unwrap_message(self, body):
         return False, False, bytes(body), bytearray()
@@ -760,6 +731,19 @@ class ConnectUnaryCodec(ConnectCodec):
         else:
             yield from super().receive_body(body)
 
+    def server_receive_body(self, body, more_body):
+        if not more_body and self._request is None:
+            # an empty request is valid.
+            _, compressed, body, _ = self.unwrap_message(body)
+            body = self.encoding.decode(compressed, body)
+            message = self.serializer.deserialize_request(body)
+            yield ReceiveMessage(message=message)
+        else:
+            for event in super().server_receive_body(body, more_body):
+                if isinstance(event, ReceiveMessage):
+                    self._request = event.message
+                yield event
+
 
 class ConnectUnaryJsonCodec(ConnectUnaryCodec):
     @property
@@ -777,9 +761,6 @@ class ConnectStreamCodec(ConnectCodec):
     def __init__(self, encoding, serializer):
         super().__init__(encoding, serializer)
         self._started = False
-
-    wrap_message = staticmethod(protocol.wrap_message_connect)
-    unwrap_message_stream = staticmethod(protocol.unwrap_message_stream_connect)
 
     def end_response(self):
         yield from self._start()

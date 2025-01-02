@@ -162,6 +162,17 @@ class grpcASGI(grpc.Server):
             enable_cors=self._enable_cors,
         )
 
+    async def _receive_body(self, codec: Codec, receive):
+        more_body = True
+        while more_body:
+            event = await receive()
+            assert event["type"].startswith("http.")
+            chunk = event["body"]
+            more_body = event.get("more_body")
+            for e in codec.server_receive_body(chunk, more_body):
+                if isinstance(e, _events.ReceiveMessage):
+                    yield e.message
+
     async def _do_grpc_request(self, rpc_method, context, receive, send, codec: Codec):
         if not rpc_method.request_streaming and not rpc_method.response_streaming:
             method = rpc_method.unary_unary
@@ -174,12 +185,7 @@ class grpcASGI(grpc.Server):
         else:
             raise NotImplementedError
 
-        request_proto_iterator = (
-            codec.serializer.deserialize_request(
-                codec.encoding.decode(compressed, bytes(message))
-            )
-            async for _, compressed, message in codec.unwrap_message_asgi(receive)
-        )
+        request_proto_iterator = self._receive_body(codec, receive)
 
         coroutine = None
         try:
