@@ -8,7 +8,7 @@ features:
     # - PROTOCOL_GRPC
   codecs:
     - CODEC_PROTO
-    # - CODEC_JSON
+    - CODEC_JSON
   compressions:
     - COMPRESSION_IDENTITY
   stream_types:

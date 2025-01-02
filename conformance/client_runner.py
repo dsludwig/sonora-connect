@@ -135,6 +135,7 @@ def handle_message(
         config_pb2.HTTP_VERSION_2,
         config_pb2.HTTP_VERSION_UNSPECIFIED,
     ]
+    json = msg.codec == config_pb2.CODEC_JSON
     ssl_context = None
     if msg.server_tls_cert:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -151,6 +152,7 @@ def handle_message(
 
     if msg.protocol == config_pb2.PROTOCOL_GRPC:
         assert not http1
+        assert not json
         assert http2
         channel = grpc.secure_channel(
             f"{msg.host}:{msg.port}",
@@ -160,11 +162,11 @@ def handle_message(
         )
     elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
         channel = sonora.client.insecure_web_channel(
-            url, pool_manager_kws={"ssl_context": ssl_context}
+            url, pool_manager_kws={"ssl_context": ssl_context}, json=json
         )
     elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
         channel = sonora.client.insecure_connect_channel(
-            url, pool_manager_kws={"ssl_context": ssl_context}
+            url, pool_manager_kws={"ssl_context": ssl_context}, json=json
         )
     else:
         return client_compat_pb2.ClientCompatResponse(

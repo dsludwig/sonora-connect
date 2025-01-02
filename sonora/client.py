@@ -12,12 +12,12 @@ from sonora import _codec, _encoding, _events, protocol
 from sonora.metadata import Metadata
 
 
-def insecure_web_channel(url, pool_manager_kws=None):
-    return WebChannel(url, pool_manager_kws=pool_manager_kws)
+def insecure_web_channel(url, pool_manager_kws=None, json=False):
+    return WebChannel(url, pool_manager_kws=pool_manager_kws, json=json)
 
 
-def insecure_connect_channel(url, pool_manager_kws=None):
-    return WebChannel(url, pool_manager_kws=pool_manager_kws, connect=True)
+def insecure_connect_channel(url, pool_manager_kws=None, json=False):
+    return WebChannel(url, pool_manager_kws=pool_manager_kws, connect=True, json=json)
 
 
 class WebChannel:
