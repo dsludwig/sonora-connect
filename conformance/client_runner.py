@@ -16,7 +16,6 @@ import time
 import traceback
 from typing import Any, List, Tuple
 
-import aiohttp
 import grpc.aio
 from connectrpc.conformance.v1 import (
     client_compat_pb2,
@@ -29,6 +28,7 @@ from grpc_status import rpc_status
 
 import sonora.aio
 import sonora.client
+import sonora.clientx
 import sonora.protocol
 
 logger = logging.getLogger("conformance.runner")
@@ -348,17 +348,17 @@ async def handle_message_async(
             ),
         )
     elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-        channel = sonora.aio.insecure_web_channel(
+        # connector = aiohttp.TCPConnector(ssl=ssl_context)
+        channel = sonora.clientx.insecure_web_channel(
             url,
-            session_kws={"connector": connector},
+            client_kws={"verify": ssl_context, "http1": http1, "http2": http2},
             json=json,
         )
     elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-        channel = sonora.aio.insecure_connect_channel(
+        # connector = aiohttp.TCPConnector(ssl=ssl_context)
+        channel = sonora.clientx.insecure_connect_channel(
             url,
-            session_kws={"connector": connector},
+            client_kws={"verify": ssl_context, "http1": http1, "http2": http2},
             json=json,
         )
     else:
