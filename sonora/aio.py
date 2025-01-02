@@ -257,7 +257,32 @@ class Call(sonora.client.Call):
         return self._trailers
 
 
-class UnaryUnaryCall(Call):
+class UnaryResponseCall(Call):
+    async def _get_response(self):
+        message = None
+        async for e in self._do_call():
+            if isinstance(e, _events.ReceiveMessage):
+                if message is None:
+                    message = e.message
+                else:
+                    raise protocol.WebRpcError(
+                        grpc.StatusCode.UNIMPLEMENTED,
+                        "Received multiple responses for a unary call",
+                    )
+            else:
+                await self._do_event(e)
+
+        if message is None:
+            raise protocol.WebRpcError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "Missing response for unary call",
+                initial_metadata=self._codec._initial_metadata,
+                trailing_metadata=self._codec._trailing_metadata,
+            )
+        return message
+
+
+class UnaryUnaryCall(UnaryResponseCall):
     request_streaming = False
     response_streaming = False
 
@@ -265,31 +290,8 @@ class UnaryUnaryCall(Call):
     def __await__(self):
         self._body = body_generator(self._codec.send_request(self._request))
 
-        async def closure():
-            message = None
-            async for e in self._do_call():
-                if isinstance(e, _events.ReceiveMessage):
-                    if message is None:
-                        message = e.message
-                    else:
-                        raise protocol.WebRpcError(
-                            grpc.StatusCode.UNIMPLEMENTED,
-                            "Received multiple responses for a unary-unary call",
-                        )
-                else:
-                    await self._do_event(e)
-
-            if message is None:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.UNIMPLEMENTED,
-                    "Missing response for unary-unary call",
-                    initial_metadata=self._codec._initial_metadata,
-                    trailing_metadata=self._codec._trailing_metadata,
-                )
-            return message
-
         try:
-            message = yield from closure().__await__()
+            message = yield from self._get_response().__await__()
             return message
         finally:
             if self._response:
@@ -300,30 +302,30 @@ class UnaryStreamCall(Call):
     request_streaming = False
     response_streaming = True
 
-    @Call._raise_timeout(asyncio.TimeoutError)
-    async def read(self):
-        response = await self._get_response()
+    # @Call._raise_timeout(asyncio.TimeoutError)
+    # async def read(self):
+    #     response = await self._get_response()
 
-        async for trailers, compressed, message in self._unwrap_message_stream_async(
-            response.content
-        ):
-            if trailers:
-                self._trailers = self._unpack_trailers(message, response.headers)
-                break
-            elif compressed:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.INTERNAL, "Unexpected compression"
-                )
-            else:
-                return self._deserializer(message)
+    #     async for trailers, compressed, message in self._unwrap_message_stream_async(
+    #         response.content
+    #     ):
+    #         if trailers:
+    #             self._trailers = self._unpack_trailers(message, response.headers)
+    #             break
+    #         elif compressed:
+    #             raise protocol.WebRpcError(
+    #                 grpc.StatusCode.INTERNAL, "Unexpected compression"
+    #             )
+    #         else:
+    #             return self._deserializer(message)
 
-        response.release()
+    #     response.release()
 
-        self._raise_for_status(
-            response.headers, self._trailers, self._expected_content_types
-        )
+    #     self._raise_for_status(
+    #         response.headers, self._trailers, self._expected_content_types
+    #     )
 
-        return grpc.experimental.aio.EOF
+    #     return grpc.experimental.aio.EOF
 
     @Call._raise_timeout(asyncio.TimeoutError)
     async def __aiter__(self):
@@ -336,30 +338,7 @@ class UnaryStreamCall(Call):
                 await self._do_event(e)
 
 
-class StreamingRequestCall(Call):
-    async def _request_stream(self):
-        for req in self._request:
-            yield protocol.wrap_message(False, False, self._serializer(req))
-
-    async def _get_response(self):
-        if self._response is None:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-
-            self._response = await self._session.post(
-                self._url,
-                data=self._request_stream(),
-                headers=self._metadata,
-                timeout=timeout,
-                chunked=True,
-            )
-
-            # XXX
-            # protocol.raise_for_status(self._response.headers)
-
-        return self._response
-
-
-class StreamUnaryCall(Call):
+class StreamUnaryCall(UnaryResponseCall):
     request_streaming = True
     response_streaming = False
 
@@ -371,31 +350,8 @@ class StreamUnaryCall(Call):
             )
         )
 
-        async def closure():
-            message = None
-            async for e in self._do_call():
-                if isinstance(e, _events.ReceiveMessage):
-                    if message is None:
-                        message = e.message
-                    else:
-                        raise protocol.WebRpcError(
-                            grpc.StatusCode.UNIMPLEMENTED,
-                            "Received multiple responses for a unary-unary call",
-                        )
-                else:
-                    await self._do_event(e)
-
-            if message is None:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.UNIMPLEMENTED,
-                    "Missing response for unary-unary call",
-                    initial_metadata=self._codec._initial_metadata,
-                    trailing_metadata=self._codec._trailing_metadata,
-                )
-            return message
-
         try:
-            message = yield from closure().__await__()
+            message = yield from self._get_response().__await__()
             return message
         finally:
             if self._response:
@@ -406,35 +362,35 @@ class StreamStreamCall(Call):
     request_streaming = True
     response_streaming = True
 
-    @Call._raise_timeout(asyncio.TimeoutError)
-    async def read(self):
-        response = await self._get_response()
+    # @Call._raise_timeout(asyncio.TimeoutError)
+    # async def read(self):
+    #     response = await self._get_response()
 
-        async for trailers, compressed, message in self._unwrap_message_stream_async(
-            response.content
-        ):
-            if trailers:
-                self._trailers = self._unpack_trailers(message, response.headers)
-                break
-            elif compressed:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.INTERNAL, "Unexpected compression"
-                )
-            else:
-                try:
-                    return self._deserializer(message)
-                except Exception:
-                    raise protocol.WebRpcError(
-                        grpc.StatusCode.INTERNAL, "Could not decode response"
-                    )
+    #     async for trailers, compressed, message in self._unwrap_message_stream_async(
+    #         response.content
+    #     ):
+    #         if trailers:
+    #             self._trailers = self._unpack_trailers(message, response.headers)
+    #             break
+    #         elif compressed:
+    #             raise protocol.WebRpcError(
+    #                 grpc.StatusCode.INTERNAL, "Unexpected compression"
+    #             )
+    #         else:
+    #             try:
+    #                 return self._deserializer(message)
+    #             except Exception:
+    #                 raise protocol.WebRpcError(
+    #                     grpc.StatusCode.INTERNAL, "Could not decode response"
+    #                 )
 
-        response.release()
+    #     response.release()
 
-        self._raise_for_status(
-            response.headers, self._trailers, self._expected_content_types
-        )
+    #     self._raise_for_status(
+    #         response.headers, self._trailers, self._expected_content_types
+    #     )
 
-        return grpc.experimental.aio.EOF
+    #     return grpc.experimental.aio.EOF
 
     @Call._raise_timeout(asyncio.TimeoutError)
     async def __aiter__(self):
