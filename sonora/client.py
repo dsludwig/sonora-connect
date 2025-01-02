@@ -255,6 +255,28 @@ class Call:
         self._trailers = None
         self._message = None
 
+    def _do_call(self):
+        self._codec.set_invocation_metadata(self._metadata)
+        self._codec.set_timeout(self._timeout)
+
+        yield from self._codec.start_request()
+        yield from self._codec.start_response(
+            _events.StartResponse(
+                status_code=self._response.status,
+                phrase=self._response.reason,
+                headers=HTTPHeaderDict(self._response.headers),
+            )
+        )
+        if self.response_streaming:
+            for chunk in self._response.stream():
+                yield from self._codec.receive_body(chunk)
+        else:
+            yield from self._codec.receive_body(self._response.data)
+
+        yield from self._codec.end_request()
+        # TODO: event?
+        self._trailers = self._codec._trailing_metadata
+
     def _do_event(self, event):
         if isinstance(event, _events.StartRequest):
             self._response = self._session.request(
@@ -356,7 +378,7 @@ class UnaryUnaryCall(Call):
             else:
                 raise protocol.WebRpcError(
                     grpc.StatusCode.UNIMPLEMENTED,
-                    "Received multiple responses for a stream-unary call",
+                    "Received multiple responses for a unary-unary call",
                 )
         else:
             super()._do_event(event)
@@ -365,25 +387,7 @@ class UnaryUnaryCall(Call):
     def __call__(self):
         self._body = body_generator(self._codec.send_request(self._request))
 
-        def do_call():
-            self._codec.set_invocation_metadata(self._metadata)
-            self._codec.set_timeout(self._timeout)
-
-            yield from self._codec.start_request()
-            yield from self._codec.start_response(
-                _events.StartResponse(
-                    status_code=self._response.status,
-                    phrase=self._response.reason,
-                    headers=HTTPHeaderDict(self._response.headers),
-                )
-            )
-            yield from self._codec.receive_body(self._response.data)
-            yield from self._codec.end_request()
-
-            # TODO: event?
-            self._trailers = self._codec._trailing_metadata
-
-        self._do_events(do_call())
+        self._do_events(self._do_call())
         if self._message is None:
             raise protocol.WebRpcError(
                 grpc.StatusCode.UNIMPLEMENTED,
@@ -402,26 +406,8 @@ class UnaryStreamCall(Call):
     def __iter__(self):
         self._body = body_generator(self._codec.send_request(self._request))
 
-        def do_call():
-            self._codec.set_invocation_metadata(self._metadata)
-            self._codec.set_timeout(self._timeout)
-
-            yield from self._codec.start_request()
-            yield from self._codec.start_response(
-                _events.StartResponse(
-                    status_code=self._response.status,
-                    phrase=self._response.reason,
-                    headers=HTTPHeaderDict(self._response.headers),
-                )
-            )
-            yield from self._codec.receive_body(self._response.data)
-            yield from self._codec.end_request()
-
-            # TODO: event?
-            self._trailers = self._codec._trailing_metadata
-
         try:
-            for event in do_call():
+            for event in self._do_call():
                 if isinstance(event, _events.ReceiveMessage):
                     yield event.message
                 else:
@@ -460,25 +446,7 @@ class StreamUnaryCall(Call):
             e for request in self._request for e in self._codec.send_request(request)
         )
 
-        def do_call():
-            self._codec.set_invocation_metadata(self._metadata)
-            self._codec.set_timeout(self._timeout)
-
-            yield from self._codec.start_request()
-            yield from self._codec.start_response(
-                _events.StartResponse(
-                    status_code=self._response.status,
-                    phrase=self._response.reason,
-                    headers=HTTPHeaderDict(self._response.headers),
-                )
-            )
-
-            yield from self._codec.receive_body(self._response.data)
-            yield from self._codec.end_request()
-            # TODO: event?
-            self._trailers = self._codec._trailing_metadata
-
-        self._do_events(do_call())
+        self._do_events(self._do_call())
         if self._message is None:
             raise protocol.WebRpcError(
                 grpc.StatusCode.UNIMPLEMENTED,
@@ -505,27 +473,8 @@ class StreamStreamCall(Call):
             )
         )
 
-        def do_call():
-            self._codec.set_invocation_metadata(self._metadata)
-            self._codec.set_timeout(self._timeout)
-
-            yield from self._codec.start_request()
-            yield from self._codec.start_response(
-                _events.StartResponse(
-                    status_code=self._response.status,
-                    phrase=self._response.reason,
-                    headers=HTTPHeaderDict(self._response.headers),
-                )
-            )
-            for chunk in self._response.stream():
-                yield from self._codec.receive_body(chunk)
-
-            yield from self._codec.end_request()
-            # TODO: event?
-            self._trailers = self._codec._trailing_metadata
-
         try:
-            for event in do_call():
+            for event in self._do_call():
                 if isinstance(event, _events.ReceiveMessage):
                     yield event.message
                 else:
