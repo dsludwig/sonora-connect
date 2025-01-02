@@ -196,7 +196,6 @@ class Call(sonora.client.Call):
                 headers=event.headers,
                 timeout=timeout,
                 compress=False,
-                # preload_content=not self.response_streaming,
                 chunked=self.request_streaming or self.response_streaming,
             )
         elif isinstance(event, _events.SendBody):
@@ -222,7 +221,7 @@ class Call(sonora.client.Call):
         ):
             yield e
         if self.response_streaming:
-            for chunk in self._response.content.iter_any():
+            async for chunk in self._response.content.iter_any():
                 for e in self._codec.receive_body(chunk):
                     yield e
         else:
@@ -251,8 +250,8 @@ class Call(sonora.client.Call):
         return self._response
 
     async def initial_metadata(self):
-        response = await self._get_response()
-        return response.headers.items()
+        # response = await self._get_response()
+        return self._response.headers.items()
 
     async def trailing_metadata(self):
         return self._trailers
@@ -328,31 +327,13 @@ class UnaryStreamCall(Call):
 
     @Call._raise_timeout(asyncio.TimeoutError)
     async def __aiter__(self):
-        response = await self._get_response()
+        self._body = body_generator(self._codec.send_request(self._request))
 
-        async for trailers, compressed, message in self._unwrap_message_stream_async(
-            response.content
-        ):
-            if trailers:
-                self._trailers = self._unpack_trailers(message, response.headers)
-                break
-            elif compressed:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.INTERNAL, "Unexpected compression"
-                )
+        async for e in self._do_call():
+            if isinstance(e, _events.ReceiveMessage):
+                yield e.message
             else:
-                try:
-                    yield self._deserializer(message)
-                except Exception:
-                    raise protocol.WebRpcError(
-                        grpc.StatusCode.INTERNAL, "Could not decode response"
-                    )
-
-        response.release()
-
-        self._raise_for_status(
-            response.headers, self._trailers, self._expected_content_types
-        )
+                await self._do_event(e)
 
 
 class StreamingRequestCall(Call):
@@ -378,7 +359,7 @@ class StreamingRequestCall(Call):
         return self._response
 
 
-class StreamUnaryCall(StreamingRequestCall):
+class StreamUnaryCall(Call):
     request_streaming = True
     response_streaming = False
 
@@ -421,7 +402,7 @@ class StreamUnaryCall(StreamingRequestCall):
                 self._response.release()
 
 
-class StreamStreamCall(StreamingRequestCall):
+class StreamStreamCall(Call):
     request_streaming = True
     response_streaming = True
 
@@ -457,28 +438,14 @@ class StreamStreamCall(StreamingRequestCall):
 
     @Call._raise_timeout(asyncio.TimeoutError)
     async def __aiter__(self):
-        response = await self._get_response()
-
-        async for trailers, compressed, message in self._unwrap_message_stream_async(
-            response.content
-        ):
-            if trailers:
-                self._trailers = self._unpack_trailers(message, response.headers)
-                break
-            elif compressed:
-                raise protocol.WebRpcError(
-                    grpc.StatusCode.INTERNAL, "Unexpected compression"
-                )
-            else:
-                try:
-                    yield self._deserializer(message)
-                except Exception:
-                    raise protocol.WebRpcError(
-                        grpc.StatusCode.INTERNAL, "Could not decode response"
-                    )
-
-        response.release()
-
-        self._raise_for_status(
-            response.headers, self._trailers, self._expected_content_types
+        self._body = body_generator(
+            itertools.chain.from_iterable(
+                self._codec.send_request(request) for request in self._request
+            )
         )
+
+        async for e in self._do_call():
+            if isinstance(e, _events.ReceiveMessage):
+                yield e.message
+            else:
+                await self._do_event(e)

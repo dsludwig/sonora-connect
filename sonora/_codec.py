@@ -651,7 +651,15 @@ class ConnectCodec(GrpcCodec):
                 self.set_trailing_metadata(trailing_metadata)
                 return tuple()
 
-            body = self.encoding.decode(compressed, body)
+            try:
+                body = self.encoding.decode(compressed, body)
+            except protocol.ProtocolError:
+                raise protocol.WebRpcError(
+                    code=grpc.StatusCode.INTERNAL,
+                    details="Could not decode response",
+                    initial_metadata=self._initial_metadata,
+                    trailing_metadata=self._trailing_metadata,
+                )
             try:
                 message = self.serializer.deserialize_response(body)
             except Exception:
