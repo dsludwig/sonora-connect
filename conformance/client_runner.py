@@ -323,6 +323,7 @@ async def handle_message_async(
         config_pb2.HTTP_VERSION_2,
         config_pb2.HTTP_VERSION_UNSPECIFIED,
     ]
+    json = msg.codec == config_pb2.CODEC_JSON
     ssl_context = None
     if msg.server_tls_cert:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -349,12 +350,16 @@ async def handle_message_async(
     elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
         connector = aiohttp.TCPConnector(ssl=ssl_context)
         channel = sonora.aio.insecure_web_channel(
-            url, session_kws={"connector": connector}
+            url,
+            session_kws={"connector": connector},
+            json=json,
         )
     elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
         connector = aiohttp.TCPConnector(ssl=ssl_context)
         channel = sonora.aio.insecure_connect_channel(
-            url, session_kws={"connector": connector}
+            url,
+            session_kws={"connector": connector},
+            json=json,
         )
     else:
         return client_compat_pb2.ClientCompatResponse(

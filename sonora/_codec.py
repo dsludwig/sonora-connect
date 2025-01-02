@@ -565,7 +565,10 @@ class ConnectCodec(GrpcCodec):
             "POST",
             headers=protocol.encode_headers(
                 itertools.chain(
-                    (("content-type", self.content_type),),
+                    (
+                        ("content-type", self.content_type),
+                        ("accept-encoding", self.encoding.encoding),
+                    ),
                     ()
                     if self._timeout is None
                     else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
