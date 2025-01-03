@@ -6,13 +6,16 @@ from sonora import protocol
 class Encoding:
     @property
     @abc.abstractmethod
-    def encoding(self) -> str: ...
+    def encoding(self) -> str:
+        ...
 
     @abc.abstractmethod
-    def decode(self, compressed: bool, message: bytes) -> bytes: ...
+    def decode(self, compressed: bool, message: bytes) -> bytes:
+        ...
 
     @abc.abstractmethod
-    def encode(self, message: bytes) -> bytes: ...
+    def encode(self, message: bytes) -> bytes:
+        ...
 
 
 class IdentityEncoding(Encoding):
