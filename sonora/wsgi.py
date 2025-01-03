@@ -174,7 +174,7 @@ class grpcWSGI(grpc.Server):
             if isinstance(event, _events.StartResponse):
                 start_response(
                     f"{event.status_code} {event.phrase}",
-                    itertools.chain(headers, event.headers),
+                    list(itertools.chain(headers, event.headers)),
                 )
             elif isinstance(event, _events.SendBody):
                 yield event.body

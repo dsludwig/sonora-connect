@@ -96,12 +96,14 @@ class grpcASGI(grpc.Server):
                     {
                         "type": "http.response.start",
                         "status": event.status_code,
-                        "headers": itertools.chain(
-                            headers,
-                            (
-                                (k.encode("ascii"), v.encode("utf-8"))
-                                for (k, v) in event.headers
-                            ),
+                        "headers": list(
+                            itertools.chain(
+                                headers,
+                                (
+                                    (k.encode("ascii"), v.encode("utf-8"))
+                                    for (k, v) in event.headers
+                                ),
+                            )
                         ),
                         "trailers": event.trailers,
                     }
@@ -150,7 +152,7 @@ class grpcASGI(grpc.Server):
                 timeout = int(value) / 1000
             else:
                 if header.endswith(b"-bin"):
-                    value = protocol.b64decode(value)
+                    value = protocol.b64decode(value.decode("ascii"))
                 else:
                     value = value.decode("ascii")
 

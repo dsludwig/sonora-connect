@@ -1,7 +1,7 @@
 import grpc
 import pytest
-
 from google.protobuf.empty_pb2 import Empty
+
 from tests import helloworld_pb2
 
 
@@ -92,8 +92,13 @@ async def test_helloworld_unary_metadata_binary(asgi_greeter):
     initial_metadata = await call.initial_metadata()
     trailing_metadata = await call.trailing_metadata()
 
-    assert dict(initial_metadata)["initial-metadata-key-bin"] == repr(b"\0\1\2\3")
-    assert dict(trailing_metadata)["trailing-metadata-key-bin"] == repr(b"\0\1\2\3")
+    assert (
+        dict(initial_metadata)["initial-metadata-key-bin"] == repr(b"\0\1\2\3").encode()
+    )
+    assert (
+        dict(trailing_metadata)["trailing-metadata-key-bin"]
+        == repr(b"\0\1\2\3").encode()
+    )
 
 
 @pytest.mark.asyncio

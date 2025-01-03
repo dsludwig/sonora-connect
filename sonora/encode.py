@@ -1,13 +1,13 @@
 import base64
 
 
-def b64encode(value):
+def b64encode(value: bytes) -> str:
     # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     # Implementations MUST accept padded and un-padded values and should emit un-padded values.
     return base64.b64encode(value).decode("ascii").rstrip("=")
 
 
-def b64decode(value):
+def b64decode(value: str) -> bytes:
     # https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
     # Implementations MUST accept padded and un-padded values and should emit un-padded values.
     _, padlength = divmod(len(value), 8)

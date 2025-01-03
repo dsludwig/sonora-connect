@@ -1,6 +1,6 @@
-from google.protobuf.empty_pb2 import Empty
 import grpc
 import pytest
+from google.protobuf.empty_pb2 import Empty
 
 from tests import helloworld_pb2
 
@@ -57,8 +57,8 @@ def test_helloworld_unary_metadata_ascii(wsgi_greeter):
     initial_metadata = call.initial_metadata()
     trailing_metadata = call.trailing_metadata()
 
-    assert dict(initial_metadata)["initial-metadata-key"] == repr("honk")
-    assert dict(trailing_metadata)["trailing-metadata-key"] == repr("honk")
+    assert (initial_metadata)["initial-metadata-key"] == repr("honk")
+    assert (trailing_metadata)["trailing-metadata-key"] == repr("honk")
 
 
 def test_helloworld_unary_metadata_binary(wsgi_greeter):
@@ -71,8 +71,10 @@ def test_helloworld_unary_metadata_binary(wsgi_greeter):
     initial_metadata = call.initial_metadata()
     trailing_metadata = call.trailing_metadata()
 
-    assert dict(initial_metadata)["initial-metadata-key-bin"] == repr(b"\0\1\2\3")
-    assert dict(trailing_metadata)["trailing-metadata-key-bin"] == repr(b"\0\1\2\3")
+    assert (initial_metadata)["initial-metadata-key-bin"] == repr(b"\0\1\2\3").encode()
+    assert (trailing_metadata)["trailing-metadata-key-bin"] == repr(
+        b"\0\1\2\3"
+    ).encode()
 
 
 def test_helloworld_stream_metadata_ascii(wsgi_greeter):
@@ -89,5 +91,5 @@ def test_helloworld_stream_metadata_ascii(wsgi_greeter):
     trailing_metadata = result.trailing_metadata()
     print("initial_metadata", initial_metadata)
     print("trailing_metadata", trailing_metadata)
-    assert dict(initial_metadata)["initial-metadata-key"] == repr("honk")
-    assert dict(trailing_metadata)["trailing-metadata-key"] == repr("honk")
+    assert (initial_metadata)["initial-metadata-key"] == repr("honk")
+    assert (trailing_metadata)["trailing-metadata-key"] == repr("honk")

@@ -165,7 +165,7 @@ class UnaryUnaryMulticallable(Multicallable):
     def with_call(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
-            call_metadata.extend((metadata))
+            call_metadata.extend(protocol.encode_headers(metadata))
 
         call = UnaryUnaryCall(
             request,
@@ -300,7 +300,7 @@ class Call:
             self._do_event(event)
 
     def initial_metadata(self):
-        return self._response.headers.items()
+        return Metadata(self._response.headers.items())
 
     def trailing_metadata(self):
         return self._trailers
@@ -417,7 +417,8 @@ class UnaryStreamCall(Call):
                 grpc.StatusCode.INTERNAL, "Unexpected compression"
             )
         finally:
-            self._response.release_conn()
+            if self._response:
+                self._response.release_conn()
 
     def __del__(self):
         if self._response and self._response.connection:
@@ -484,7 +485,8 @@ class StreamStreamCall(Call):
                 grpc.StatusCode.INTERNAL, "Unexpected compression"
             )
         finally:
-            self._response.release_conn()
+            if self._response:
+                self._response.release_conn()
 
     def __del__(self):
         if self._response and self._response.connection:

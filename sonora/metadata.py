@@ -25,7 +25,7 @@ MetadataDict = dict[
 ]
 
 
-class Metadata(abc.Mapping[MetadataKey, MetadataValue]):
+class Metadata(abc.Collection):
     """Deserialized GPRC headers. `-bin` headers are stored in bytes format, not
     base64-encoded."""
 
@@ -86,6 +86,9 @@ class Metadata(abc.Mapping[MetadataKey, MetadataValue]):
     def __getitem__(self, key: MetadataKey) -> MetadataValue:
         values = self._state[self._normalize(key)]
         return values[0]
+
+    def __contains__(self, key):
+        return key in self._state
 
     # This method is compatible with the expected interface of metadata for grpc.
     def __iter__(self) -> typing.Iterator[tuple[MetadataKey, MetadataValue]]:  # type: ignore[override]

@@ -6,6 +6,7 @@ import grpc.experimental.aio
 
 import sonora.client
 from sonora import _codec, _encoding, _events, protocol
+from sonora.metadata import Metadata
 
 
 def insecure_web_channel(url, session_kws=None, json=False):
@@ -251,7 +252,7 @@ class Call(sonora.client.Call):
 
     async def initial_metadata(self):
         # response = await self._get_response()
-        return self._response.headers.items()
+        return Metadata(self._response.headers.items())
 
     async def trailing_metadata(self):
         return self._trailers

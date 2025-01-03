@@ -1,22 +1,21 @@
 import asyncio
-from concurrent import futures
 import contextlib
 import multiprocessing
 import socket
 import time
+from concurrent import futures
 
 import bjoern
 import grpc
-from google.protobuf import empty_pb2
 import pytest
 import uvicorn
+from google.protobuf import empty_pb2
 
 import sonora.aio
 import sonora.asgi
 import sonora.client
 import sonora.protocol
 import sonora.wsgi
-
 from tests import benchmark_pb2, benchmark_pb2_grpc, helloworld_pb2, helloworld_pb2_grpc
 
 FORMAT_STRING = "Hello, {request.name}!"
@@ -51,12 +50,18 @@ class SyncGreeter(helloworld_pb2_grpc.GreeterServicer):
             raise KeyError(request.name)
 
         context.send_initial_metadata(
-            (f"initial-{key}", repr(value))
+            (
+                f"initial-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
         context.set_trailing_metadata(
-            (f"trailing-{key}", repr(value))
+            (
+                f"trailing-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
@@ -70,7 +75,10 @@ class SyncGreeter(helloworld_pb2_grpc.GreeterServicer):
             raise KeyError(request.name)
 
         context.send_initial_metadata(
-            (f"initial-{key}", repr(value))
+            (
+                f"initial-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
@@ -78,7 +86,10 @@ class SyncGreeter(helloworld_pb2_grpc.GreeterServicer):
             yield helloworld_pb2.HelloReply(message=c)
 
         context.set_trailing_metadata(
-            (f"trailing-{key}", repr(value))
+            (
+                f"trailing-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
@@ -113,12 +124,18 @@ class AsyncGreeter(helloworld_pb2_grpc.GreeterServicer):
             raise KeyError(request.name)
 
         await context.send_initial_metadata(
-            (f"initial-{key}", repr(value))
+            (
+                f"initial-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
         context.set_trailing_metadata(
-            (f"trailing-{key}", repr(value))
+            (
+                f"trailing-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
@@ -132,7 +149,10 @@ class AsyncGreeter(helloworld_pb2_grpc.GreeterServicer):
             raise KeyError(request.name)
 
         await context.send_initial_metadata(
-            (f"initial-{key}", repr(value))
+            (
+                f"initial-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
@@ -140,7 +160,10 @@ class AsyncGreeter(helloworld_pb2_grpc.GreeterServicer):
             yield helloworld_pb2.HelloReply(message=c)
 
         context.set_trailing_metadata(
-            (f"trailing-{key}", repr(value))
+            (
+                f"trailing-{key}",
+                repr(value).encode() if key.endswith("-bin") else repr(value),
+            )
             for key, value in context.invocation_metadata()
         )
 
