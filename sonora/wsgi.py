@@ -227,7 +227,7 @@ class grpcWSGI(grpc.Server):
         self,
         codec: Codec,
         start_response,
-        context: grpc.ServicerContext,
+        context: "ServicerContext",
         headers,
         resp,
     ):

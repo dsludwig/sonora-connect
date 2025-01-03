@@ -18,18 +18,22 @@ from collections import abc
 from .protocol import b64decode
 
 MetadataKey = str
-MetadataValue = str | bytes
+MetadataValue = typing.Union[str, bytes]
 MetadataList = typing.Iterable[tuple[MetadataKey, MetadataValue]]
-MetadataDict = dict[MetadataKey, MetadataValue | typing.Iterable[MetadataValue]]
+MetadataDict = dict[
+    MetadataKey, typing.Union[MetadataValue, typing.Iterable[MetadataValue]]
+]
 
 
-class Metadata(abc.Mapping):
+class Metadata(abc.Mapping[MetadataKey, MetadataValue]):
     """Deserialized GPRC headers. `-bin` headers are stored in bytes format, not
     base64-encoded."""
 
     _state: dict[MetadataKey, list[MetadataValue]]
 
-    def __init__(self, headers: MetadataDict | MetadataList | None = None) -> None:
+    def __init__(
+        self, headers: "Metadata | MetadataDict | MetadataList | None" = None
+    ) -> None:
         self._state = {}
         if headers is not None:
             self.extend(headers)
@@ -55,7 +59,7 @@ class Metadata(abc.Mapping):
         else:
             self._state[key] = [value]
 
-    def extend(self, other: MetadataDict | MetadataList):
+    def extend(self, other: "Metadata | MetadataDict | MetadataList"):
         if isinstance(other, type(self)):
             for key, value in other:
                 self.add(key, value)
@@ -75,17 +79,16 @@ class Metadata(abc.Mapping):
 
     getlist = get_all
 
-    def get(
-        self, key: MetadataKey, other: MetadataValue | None = None
-    ) -> MetadataValue | None:
+    def get(self, key, default=None):
         values = self._state.get(self._normalize(key))
-        return values[0] if values else other
+        return values[0] if values else default
 
     def __getitem__(self, key: MetadataKey) -> MetadataValue:
         values = self._state[self._normalize(key)]
         return values[0]
 
-    def __iter__(self) -> typing.Iterator[tuple[MetadataKey, MetadataValue]]:
+    # This method is compatible with the expected interface of metadata for grpc.
+    def __iter__(self) -> typing.Iterator[tuple[MetadataKey, MetadataValue]]:  # type: ignore[override]
         for key, values in self._state.items():
             for value in values:
                 yield (key, value)

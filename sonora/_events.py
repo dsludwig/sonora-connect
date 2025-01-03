@@ -35,10 +35,12 @@ class ReceiveMessage(typing.NamedTuple):
 
 
 ClientEvents = typing.Iterable[
-    StartRequest
-    | SendBody
-    | ReceiveInitialMetadata
-    | ReceiveMessage
-    | ReceiveTrailingMetadata
+    typing.Union[
+        StartRequest,
+        SendBody,
+        ReceiveInitialMetadata,
+        ReceiveMessage,
+        ReceiveTrailingMetadata,
+    ]
 ]
-ServerEvents = typing.Iterable[StartResponse | SendBody | SendTrailers]
+ServerEvents = typing.Iterable[typing.Union[StartResponse, SendBody, SendTrailers]]

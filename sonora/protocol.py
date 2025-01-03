@@ -1,10 +1,15 @@
 import json
 import struct
+import typing
 from urllib.parse import unquote
 
 import grpc
 from google.protobuf import any_pb2, json_format
-from google.rpc import status_pb2
+
+if typing.TYPE_CHECKING:
+    from sonora import _status_pb2 as status_pb2
+else:
+    from google.rpc import status_pb2
 from grpc_status import rpc_status
 
 from sonora.encode import b64decode, b64encode
@@ -92,13 +97,22 @@ def unpack_error_connect(
         # )
     code = error.get("code")
     if code is not None and code in _STATUS_CODE_NAME_MAP:
-        status_code = named_status_to_code(error.get("code"))
+        status_code = named_status_to_code(code)
     if status_code is None or status_code == grpc.StatusCode.OK:
         status_code = grpc.StatusCode.INTERNAL
 
+    message = error.get("message")
+    if message is not None and not isinstance(message, str):
+        raise WebRpcError(
+            code=grpc.StatusCode.INTERNAL,
+            details=f"Invalid error message: {message!r}",
+            initial_metadata=Metadata(initial_metadata),
+            trailing_metadata=trailing_metadata,
+        )
+
     status = status_pb2.Status(
-        code=status_code.value[0],
-        message=error.get("message"),
+        code=typing.cast(tuple[int, str], status_code.value)[0],
+        message=message or "",
     )
     if "details" in error:
         for detail in error["details"]:
@@ -108,7 +122,10 @@ def unpack_error_connect(
             )
             status.details.append(any)
 
-    code, message, status_trailing_metadata = rpc_status.to_status(status)
+    status_message = rpc_status.to_status(status)
+    code = status_message.code
+    message = status_message.details
+    status_trailing_metadata = status_message.trailing_metadata
     if trailing_metadata is None:
         trailing_metadata = status_trailing_metadata
     else:

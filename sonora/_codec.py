@@ -8,7 +8,11 @@ from urllib.parse import quote
 
 import grpc
 from google.protobuf.message import Message
-from google.rpc import status_pb2
+
+if typing.TYPE_CHECKING:
+    from sonora import _status_pb2 as status_pb2
+else:
+    from google.rpc import status_pb2
 
 from sonora import protocol
 from sonora._encoding import Encoding, get_encoding
@@ -23,27 +27,25 @@ from sonora._events import (
 )
 from sonora.metadata import Metadata
 
-Deserializer = typing.Callable[[bytes], Message]
-Serializer = typing.Callable[[Message], bytes]
+Des = typing.Callable[[bytes], Message]
+Ser = typing.Callable[[Message], bytes]
 
 
 class RpcMethodHandler(typing.NamedTuple):
     request_streaming: bool
     response_streaming: bool
-    request_deserializer: Deserializer | None
-    response_serializer: Serializer | None
+    request_deserializer: Des | None
+    response_serializer: Ser | None
 
 
 class RpcOperation(typing.NamedTuple):
     request_streaming: bool
     response_streaming: bool
-    request_serializer: Serializer | None
-    response_deserializer: Deserializer | None
+    request_serializer: Ser | None
+    response_deserializer: Des | None
 
 
-def _transform(
-    serializer: Serializer | Deserializer | None, message: typing.Any
-) -> typing.Any:
+def _transform(serializer: Ser | Des | None, message: typing.Any) -> typing.Any:
     if serializer is None:
         return message
     return serializer(message)
@@ -63,10 +65,10 @@ class Serializer:
 class ProtoSerializer(Serializer):
     def __init__(
         self,
-        request_serializer: Serializer | None = None,
-        response_deserializer: Deserializer | None = None,
-        request_deserializer: Deserializer | None = None,
-        response_serializer: Serializer | None = None,
+        request_serializer: Ser | None = None,
+        response_deserializer: Des | None = None,
+        request_deserializer: Des | None = None,
+        response_serializer: Ser | None = None,
     ):
         self.request_serializer = request_serializer
         self.response_deserializer = response_deserializer
@@ -89,10 +91,10 @@ class ProtoSerializer(Serializer):
 class JsonSerializer(ProtoSerializer):
     def __init__(
         self,
-        request_serializer: Serializer | None = None,
-        response_deserializer: Deserializer | None = None,
-        request_deserializer: Deserializer | None = None,
-        response_serializer: Serializer | None = None,
+        request_serializer: Ser | None = None,
+        response_deserializer: Des | None = None,
+        request_deserializer: Des | None = None,
+        response_serializer: Ser | None = None,
     ):
         super().__init__(
             protocol.serialize_json(request_serializer) if request_serializer else None,
@@ -115,9 +117,9 @@ class Codec:
         self._initial_metadata = Metadata()
         self._trailing_metadata = Metadata()
         self._invocation_metadata = Metadata()
-        self._timeout = None
+        self._timeout: float | None = None
         self._code = grpc.StatusCode.OK
-        self._details = None
+        self._details: str | None = None
         self._buffer = bytearray()
 
     @property
@@ -511,15 +513,17 @@ class ConnectCodec(GrpcCodec):
             return None
 
         code = protocol.code_to_named_status(self._code)
-        error = {"code": code}
+        error: dict[str, typing.Any] = {"code": code}
         if self._details:
             error["message"] = self._details
 
         for name, value in self._trailing_metadata:
             if name.lower() == "grpc-status-details-bin":
                 # TODO: it's annoying to have to round trip this.
+                if not isinstance(value, bytes):
+                    value = protocol.b64decode(value)
                 status_details = status_pb2.Status()
-                status_details.ParseFromString(value)
+                status_details.ParseFromString(typing.cast(bytes, value))
                 error["details"] = [
                     {
                         "type": d.type_url.rpartition("/")[2],
@@ -835,6 +839,6 @@ def get_codec(
             codec = codec_class(encoding, serializer)
 
     if codec is None or codec.requires_trailers and not enable_trailers:
-        raise protocol.InvalidContentType(f"Unsupported content-type: {content_type}")
+        raise protocol.InvalidContentType(f"Unsupported content-type: {content_type!r}")
 
     return codec

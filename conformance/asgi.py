@@ -4,7 +4,11 @@ import typing
 import grpc
 from connectrpc.conformance.v1 import service_pb2, service_pb2_grpc
 from google.protobuf.any_pb2 import Any
-from google.rpc import status_pb2
+
+if typing.TYPE_CHECKING:
+    from sonora import _status_pb2 as status_pb2
+else:
+    from google.rpc import status_pb2
 from grpc_status import rpc_status
 from util import create_rich_error, headers_from_metadata, metadata_from_headers
 

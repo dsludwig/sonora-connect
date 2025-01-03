@@ -5,7 +5,7 @@ import time
 from collections import namedtuple
 from collections.abc import AsyncIterator
 
-import grpc
+import grpc.aio
 from async_timeout import timeout
 
 from sonora import _events, protocol
@@ -357,7 +357,7 @@ class grpcASGI(grpc.Server):
         raise NotImplementedError()
 
 
-class ServicerContext(grpc.ServicerContext):
+class ServicerContext(grpc.aio.ServicerContext):
     def __init__(self, timeout=None, metadata=None, enable_cors=True):
         self.code = grpc.StatusCode.OK
         self.details = None
@@ -447,6 +447,18 @@ class ServicerContext(grpc.ServicerContext):
             return max(self._deadline - time.monotonic(), 0)
         else:
             return None
+
+    async def read(self):
+        raise NotImplementedError()
+
+    async def write(self, message):
+        raise NotImplementedError()
+
+    def set_compression(self, compression):
+        raise NotImplementedError()
+
+    def disable_next_message_compression(self):
+        raise NotImplementedError()
 
     def peer(self):
         raise NotImplementedError()
