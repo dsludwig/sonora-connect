@@ -217,11 +217,10 @@ class Codec:
         flags, length = struct.unpack(
             protocol.HEADER_FORMAT, message[: protocol.HEADER_LENGTH]
         )
-        data = message[protocol.HEADER_LENGTH : protocol.HEADER_LENGTH + length]
-
-        if length != len(data):
+        if (protocol.HEADER_LENGTH + length) > len(message):
             raise ValueError()
 
+        data = message[protocol.HEADER_LENGTH : protocol.HEADER_LENGTH + length]
         trailers, compressed = self.unpack_header_flags(flags)
         return (
             trailers,
