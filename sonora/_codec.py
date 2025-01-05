@@ -252,6 +252,7 @@ class GrpcCodec(Codec):
     def __init__(self, encoding, serializer):
         super().__init__(encoding, serializer)
         self._started = False
+        self._closed = False
 
     @property
     def requires_trailers(self):
@@ -265,16 +266,6 @@ class GrpcCodec(Codec):
         compressed = 1
 
         return bool(trailers & flags), bool(compressed & flags)
-
-    def wrap_message(self, trailers, compressed, message):
-        return (
-            struct.pack(
-                protocol.HEADER_FORMAT,
-                self.pack_header_flags(trailers, compressed),
-                len(message),
-            )
-            + message
-        )
 
     def start_request(self):
         yield StartRequest(
@@ -364,6 +355,14 @@ class GrpcCodec(Codec):
     def receive_body(self, body):
         self._buffer.extend(body)
         while self._buffer:
+            if self._closed:
+                raise protocol.WebRpcError(
+                    code=grpc.StatusCode.CANCELLED,
+                    details="Already received trailers, cannot receive any more",
+                    initial_metadata=self._initial_metadata,
+                    trailing_metadata=self._trailing_metadata,
+                )
+
             try:
                 trailers, compressed, body, self._buffer = self.unwrap_message(
                     self._buffer
@@ -374,6 +373,7 @@ class GrpcCodec(Codec):
             if trailers:
                 trailing_metadata = Metadata(protocol.unpack_trailers(body))
                 self.set_trailing_metadata(trailing_metadata)
+                self._closed = True
                 return
 
             try:
@@ -406,6 +406,11 @@ class GrpcCodec(Codec):
         return tuple()
 
     def _start(self):
+        if self._closed:
+            raise protocol.ProtocolError(
+                "unexpected start of response after trailers have been sent"
+            )
+
         if self._started:
             return
 
@@ -441,6 +446,7 @@ class GrpcCodec(Codec):
             trailers.extend(self._trailing_metadata)
 
         yield SendTrailers(protocol.encode_headers(trailers))
+        self._closed = True
 
 
 class GrpcJsonCodec(GrpcCodec):

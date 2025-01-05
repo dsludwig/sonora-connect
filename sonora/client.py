@@ -103,7 +103,6 @@ class Multicallable:
 
         self._connect = connect
         self._json = json
-        self._codec = self._make_codec(request_serializer, response_deserializer)
         self._metadata = Metadata(
             [
                 ("x-user-agent", "grpc-web-python/0.1"),
@@ -113,7 +112,8 @@ class Multicallable:
         self._serializer = request_serializer
         self._deserializer = response_deserializer
 
-    def _make_codec(self, request_serializer, response_deserializer):
+    @property
+    def _codec(self):
         if self._connect:
             codec_class = (
                 _codec.ConnectStreamJsonCodec
@@ -129,8 +129,8 @@ class Multicallable:
         )
         encoding = _encoding.IdentityEncoding()
         serializer = serializer_class(
-            request_serializer=request_serializer,
-            response_deserializer=response_deserializer,
+            request_serializer=self._serializer,
+            response_deserializer=self._deserializer,
         )
         return codec_class(encoding, serializer)
 
@@ -139,7 +139,8 @@ class Multicallable:
 
 
 class UnaryUnaryMulticallable(Multicallable):
-    def _make_codec(self, request_serializer, response_deserializer):
+    @property
+    def _codec(self):
         if self._connect:
             codec_class = (
                 _codec.ConnectUnaryJsonCodec
@@ -151,12 +152,12 @@ class UnaryUnaryMulticallable(Multicallable):
             )
             encoding = _encoding.IdentityEncoding()
             serializer = serializer_class(
-                request_serializer=request_serializer,
-                response_deserializer=response_deserializer,
+                request_serializer=self._serializer,
+                response_deserializer=self._deserializer,
             )
             return codec_class(encoding, serializer)
         else:
-            return super()._make_codec(request_serializer, response_deserializer)
+            return super()._codec
 
     def __call__(self, request, timeout=None, metadata=None):
         result, _call = self.with_call(request, timeout, metadata)

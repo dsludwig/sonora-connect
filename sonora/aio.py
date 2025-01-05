@@ -93,7 +93,8 @@ class WebChannel:
 
 
 class UnaryUnaryMulticallable(sonora.client.Multicallable):
-    def _make_codec(self, request_serializer, response_deserializer):
+    @property
+    def _codec(self):
         if self._connect:
             codec_class = (
                 _codec.ConnectUnaryJsonCodec
@@ -105,12 +106,12 @@ class UnaryUnaryMulticallable(sonora.client.Multicallable):
             )
             encoding = _encoding.IdentityEncoding()
             serializer = serializer_class(
-                request_serializer=request_serializer,
-                response_deserializer=response_deserializer,
+                request_serializer=self._serializer,
+                response_deserializer=self._deserializer,
             )
             return codec_class(encoding, serializer)
         else:
-            return super()._make_codec(request_serializer, response_deserializer)
+            return super()._codec
 
     def __call__(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
@@ -176,11 +177,13 @@ class StreamStreamMulticallable(sonora.client.Multicallable):
 
 
 class Call(sonora.client.Call):
+    _response: aiohttp.ClientResponse
+
     def __enter__(self):
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
-        if self._response and not self._response.closed:
+        if self._response:
             self._response.close()
 
     def __del__(self):
@@ -223,6 +226,7 @@ class Call(sonora.client.Call):
             yield e
         if self.response_streaming:
             async for chunk in self._response.content.iter_any():
+                print("chunk received", len(chunk))
                 for e in self._codec.receive_body(chunk):
                     yield e
         else:
@@ -303,30 +307,19 @@ class UnaryStreamCall(Call):
     request_streaming = False
     response_streaming = True
 
-    # @Call._raise_timeout(asyncio.TimeoutError)
-    # async def read(self):
-    #     response = await self._get_response()
+    def __init__(self, request, timeout, metadata, url, session, codec):
+        super().__init__(request, timeout, metadata, url, session, codec)
+        self._aiter = None
 
-    #     async for trailers, compressed, message in self._unwrap_message_stream_async(
-    #         response.content
-    #     ):
-    #         if trailers:
-    #             self._trailers = self._unpack_trailers(message, response.headers)
-    #             break
-    #         elif compressed:
-    #             raise protocol.WebRpcError(
-    #                 grpc.StatusCode.INTERNAL, "Unexpected compression"
-    #             )
-    #         else:
-    #             return self._deserializer(message)
+    @Call._raise_timeout(asyncio.TimeoutError)
+    async def read(self):
+        if self._aiter is None:
+            self._aiter = self.__aiter__()
 
-    #     response.release()
-
-    #     self._raise_for_status(
-    #         response.headers, self._trailers, self._expected_content_types
-    #     )
-
-    #     return grpc.experimental.aio.EOF
+        try:
+            return await self._aiter.__anext__()
+        except StopAsyncIteration:
+            return grpc.experimental.aio.EOF
 
     @Call._raise_timeout(asyncio.TimeoutError)
     async def __aiter__(self):
@@ -363,35 +356,19 @@ class StreamStreamCall(Call):
     request_streaming = True
     response_streaming = True
 
-    # @Call._raise_timeout(asyncio.TimeoutError)
-    # async def read(self):
-    #     response = await self._get_response()
+    def __init__(self, request, timeout, metadata, url, session, codec):
+        super().__init__(request, timeout, metadata, url, session, codec)
+        self._aiter = None
 
-    #     async for trailers, compressed, message in self._unwrap_message_stream_async(
-    #         response.content
-    #     ):
-    #         if trailers:
-    #             self._trailers = self._unpack_trailers(message, response.headers)
-    #             break
-    #         elif compressed:
-    #             raise protocol.WebRpcError(
-    #                 grpc.StatusCode.INTERNAL, "Unexpected compression"
-    #             )
-    #         else:
-    #             try:
-    #                 return self._deserializer(message)
-    #             except Exception:
-    #                 raise protocol.WebRpcError(
-    #                     grpc.StatusCode.INTERNAL, "Could not decode response"
-    #                 )
+    @Call._raise_timeout(asyncio.TimeoutError)
+    async def read(self):
+        if self._aiter is None:
+            self._aiter = self.__aiter__()
 
-    #     response.release()
-
-    #     self._raise_for_status(
-    #         response.headers, self._trailers, self._expected_content_types
-    #     )
-
-    #     return grpc.experimental.aio.EOF
+        try:
+            return await self._aiter.__anext__()
+        except StopAsyncIteration:
+            return grpc.experimental.aio.EOF
 
     @Call._raise_timeout(asyncio.TimeoutError)
     async def __aiter__(self):
