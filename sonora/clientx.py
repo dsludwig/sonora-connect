@@ -175,18 +175,14 @@ class StreamStreamMulticallable(sonora.client.Multicallable):
 
 
 class Call(sonora.client.Call):
-    # def __enter__(self):
-    #     return self
+    _response: httpx.Response
 
-    # def __exit__(self, exception_type, exception_value, traceback):
-    #     # if self._response and not self._response.closed:
-    #     if self._response:
-    #         self._response.aclose()
+    async def __aenter__(self):
+        return self
 
-    # def __del__(self):
-    #     # if self._response and not self._response.closed:
-    #     if self._response:
-    #         self._response.aclose()
+    async def __aexit__(self, exception_type, exception_value, traceback):
+        if self._response:
+            await self._response.aclose()
 
     async def _do_event(self, event):
         if isinstance(event, _events.StartRequest):
@@ -197,8 +193,6 @@ class Call(sonora.client.Call):
                 data=self._body,
                 headers=event.headers,
                 timeout=timeout,
-                # compress=False,
-                # chunked=self.request_streaming or self.response_streaming,
             )
         elif isinstance(event, _events.SendBody):
             pass
@@ -245,9 +239,6 @@ class Call(sonora.client.Call):
                 headers=self._metadata,
                 timeout=timeout,
             )
-
-            # XXX
-            # protocol.raise_for_status(self._response.headers)
 
         return self._response
 
