@@ -1,6 +1,8 @@
 import abc
+import base64
 import itertools
 import json
+import math
 import struct
 import typing
 from http import HTTPStatus
@@ -502,13 +504,40 @@ class GrpcWebTextCodec(GrpcWebProtoCodec):
 
     @property
     def content_type(self):
-        return "application/grpc-web+proto"
+        return "application/grpc-web-text"
+
+    @property
+    def accepted_content_types(self):
+        return ("application/grpc-web-text+proto", "application/grpc-web-text")
 
     def wrap_message(self, trailers, compressed, message):
-        return protocol.b64encode(super().wrap_message(trailers, compressed, message))
+        # Padding is required because we are concatenating multiple base64-encoded
+        # messages. Omitting padding would produce incorrect results.
+        return base64.b64encode(super().wrap_message(trailers, compressed, message))
 
     def unwrap_message(self, message):
-        return super().unwrap_message(protocol.b64decode(message))
+        return super().unwrap_message(protocol.b64decode(message.decode("ascii")))
+
+    def unwrap_message_stream(self, stream):
+        # 5 bytes of header + potentially one of data.
+        header_plus = stream.read(8).decode("ascii")
+        while header_plus:
+            header = base64.b64decode(header_plus)
+            if len(header) < protocol.HEADER_LENGTH:
+                raise ValueError()
+            flags, length = struct.unpack(
+                protocol.HEADER_FORMAT, header[: protocol.HEADER_LENGTH]
+            )
+            trailers, compressed = self.unpack_header_flags(flags)
+
+            data = header[protocol.HEADER_LENGTH :]
+            encoded_length = math.ceil((length - len(data)) / 3) * 4
+            encoded_data = stream.read(encoded_length)
+
+            data += base64.b64decode(encoded_data)
+            yield trailers, compressed, data
+
+            header_plus = stream.read(8).decode("ascii")
 
 
 class ConnectCodec(GrpcCodec):

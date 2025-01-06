@@ -322,8 +322,8 @@ class grpcASGI(grpc.Server):
 
     async def _do_cors_preflight(self, scope, receive, send):
         origin = next(
-            (value for header, value in scope["headers"] if header == "host"),
-            scope["server"][0],
+            (value for header, value in scope["headers"] if header == b"origin"),
+            scope["server"][0].encode("ascii"),
         )
 
         await send(
@@ -377,19 +377,22 @@ class ServicerContext(grpc.aio.ServicerContext):
         self._trailing_metadata = None
 
         origin = None
+        host = None
 
         for header, value in metadata:
-            if header == "host":
+            if header == "origin":
                 origin = value
+            elif header == "host":
+                host = value
 
-        if not origin:
+        if not host:
             raise ValueError("Request is missing the host header")
 
         self._response_headers = []
 
         if enable_cors:
             self._response_headers += [
-                (b"Access-Control-Allow-Origin", origin.encode("ascii")),
+                (b"Access-Control-Allow-Origin", (origin or host).encode("ascii")),
                 (b"Access-Control-Expose-Headers", b"*"),
             ]
 

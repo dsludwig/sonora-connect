@@ -132,6 +132,7 @@ class grpcWSGI(grpc.Server):
             except protocol.InvalidEncoding:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             except protocol.ProtocolError:
+                logging.exception("Protocol error handling RPC method")
                 context.set_code(grpc.StatusCode.INTERNAL)
             except Exception:
                 logging.exception("Exception handling RPC method")
@@ -142,7 +143,7 @@ class grpcWSGI(grpc.Server):
             headers.append(
                 (
                     "Access-Control-Allow-Origin",
-                    environ.get("HTTP_HOST") or environ["SERVER_NAME"],
+                    environ.get("HTTP_ORIGIN") or environ["SERVER_NAME"],
                 ),
             )
             headers.append(("Access-Control-Expose-Headers", "*"))
@@ -260,7 +261,7 @@ class grpcWSGI(grpc.Server):
                 ("Access-Control-Allow-Headers", "*"),
                 (
                     "Access-Control-Allow-Origin",
-                    environ.get("HTTP_HOST") or environ["SERVER_NAME"],
+                    environ.get("HTTP_ORIGIN") or environ["SERVER_NAME"],
                 ),
                 ("Access-Control-Allow-Credentials", "true"),
                 ("Access-Control-Expose-Headers", "*"),
