@@ -19,7 +19,9 @@ class Proto:
             self._data_to_send = self._data_to_send[amount:]
             return data
 
-    def begin_request(self, method: str, headers: typing.Iterable[tuple[str, str]]):
+    def begin_request(
+        self, method: str, headers: typing.Iterable[typing.Tuple[str, str]]
+    ):
         pass
 
     def send_initial_metadata(self):

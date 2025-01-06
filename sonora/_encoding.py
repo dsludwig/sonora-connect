@@ -1,4 +1,5 @@
 import abc
+import typing
 
 from sonora import protocol
 
@@ -6,16 +7,13 @@ from sonora import protocol
 class Encoding:
     @property
     @abc.abstractmethod
-    def encoding(self) -> str:
-        ...
+    def encoding(self) -> str: ...
 
     @abc.abstractmethod
-    def decode(self, compressed: bool, message: bytes) -> bytes:
-        ...
+    def decode(self, compressed: bool, message: bytes) -> bytes: ...
 
     @abc.abstractmethod
-    def encode(self, message: bytes) -> bytes:
-        ...
+    def encode(self, message: bytes) -> bytes: ...
 
 
 class IdentityEncoding(Encoding):
@@ -46,7 +44,7 @@ class InvalidEncoding(Encoding):
         raise protocol.InvalidEncoding("cannot encode with unsupported encoder")
 
 
-def get_encoding(encoding: str | None) -> Encoding:
+def get_encoding(encoding: typing.Optional[str]) -> Encoding:
     if encoding is None or encoding.lower() == "identity":
         return IdentityEncoding()
     return InvalidEncoding()

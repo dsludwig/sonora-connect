@@ -34,18 +34,20 @@ Ser = typing.Callable[[Message], bytes]
 class RpcMethodHandler(typing.NamedTuple):
     request_streaming: bool
     response_streaming: bool
-    request_deserializer: Des | None
-    response_serializer: Ser | None
+    request_deserializer: typing.Optional[Des]
+    response_serializer: typing.Optional[Ser]
 
 
 class RpcOperation(typing.NamedTuple):
     request_streaming: bool
     response_streaming: bool
-    request_serializer: Ser | None
-    response_deserializer: Des | None
+    request_serializer: typing.Optional[Ser]
+    response_deserializer: typing.Optional[Des]
 
 
-def _transform(serializer: Ser | Des | None, message: typing.Any) -> typing.Any:
+def _transform(
+    serializer: typing.Union[Ser, Des, None], message: typing.Any
+) -> typing.Any:
     if serializer is None:
         return message
     return serializer(message)
@@ -53,29 +55,25 @@ def _transform(serializer: Ser | Des | None, message: typing.Any) -> typing.Any:
 
 class Serializer:
     @abc.abstractmethod
-    def serialize_request(self, request: Message) -> bytes:
-        ...
+    def serialize_request(self, request: Message) -> bytes: ...
 
     @abc.abstractmethod
-    def deserialize_response(self, response: bytes) -> Message:
-        ...
+    def deserialize_response(self, response: bytes) -> Message: ...
 
     @abc.abstractmethod
-    def serialize_response(self, response: Message) -> bytes:
-        ...
+    def serialize_response(self, response: Message) -> bytes: ...
 
     @abc.abstractmethod
-    def deserialize_request(self, request: bytes) -> Message:
-        ...
+    def deserialize_request(self, request: bytes) -> Message: ...
 
 
 class ProtoSerializer(Serializer):
     def __init__(
         self,
-        request_serializer: Ser | None = None,
-        response_deserializer: Des | None = None,
-        request_deserializer: Des | None = None,
-        response_serializer: Ser | None = None,
+        request_serializer: typing.Optional[Ser] = None,
+        response_deserializer: typing.Optional[Des] = None,
+        request_deserializer: typing.Optional[Des] = None,
+        response_serializer: typing.Optional[Ser] = None,
     ):
         self.request_serializer = request_serializer
         self.response_deserializer = response_deserializer
@@ -98,22 +96,28 @@ class ProtoSerializer(Serializer):
 class JsonSerializer(ProtoSerializer):
     def __init__(
         self,
-        request_serializer: Ser | None = None,
-        response_deserializer: Des | None = None,
-        request_deserializer: Des | None = None,
-        response_serializer: Ser | None = None,
+        request_serializer: typing.Optional[Ser] = None,
+        response_deserializer: typing.Optional[Des] = None,
+        request_deserializer: typing.Optional[Des] = None,
+        response_serializer: typing.Optional[Ser] = None,
     ):
         super().__init__(
             protocol.serialize_json(request_serializer) if request_serializer else None,
-            protocol.deserialize_json(response_deserializer)
-            if response_deserializer
-            else None,
-            protocol.deserialize_json(request_deserializer)
-            if request_deserializer
-            else None,
-            protocol.serialize_json(response_serializer)
-            if response_serializer
-            else None,
+            (
+                protocol.deserialize_json(response_deserializer)
+                if response_deserializer
+                else None
+            ),
+            (
+                protocol.deserialize_json(request_deserializer)
+                if request_deserializer
+                else None
+            ),
+            (
+                protocol.serialize_json(response_serializer)
+                if response_serializer
+                else None
+            ),
         )
 
 
@@ -124,32 +128,28 @@ class Codec:
         self._initial_metadata = Metadata()
         self._trailing_metadata = Metadata()
         self._invocation_metadata = Metadata()
-        self._timeout: float | None = None
+        self._timeout: typing.Optional[float] = None
         self._code = grpc.StatusCode.OK
-        self._details: str | None = None
+        self._details: typing.Optional[str] = None
         self._buffer = bytearray()
 
     @property
     @abc.abstractmethod
-    def content_type(self) -> str:
-        ...
+    def content_type(self) -> str: ...
 
     @property
-    def accepted_content_types(self) -> tuple[str, ...]:
+    def accepted_content_types(self) -> typing.Tuple[str, ...]:
         return (self.content_type,)
 
     @property
     @abc.abstractmethod
-    def requires_trailers(self) -> bool:
-        ...
+    def requires_trailers(self) -> bool: ...
 
     @abc.abstractmethod
-    def unpack_header_flags(self, flags: int) -> tuple[bool, bool]:
-        ...
+    def unpack_header_flags(self, flags: int) -> typing.Tuple[bool, bool]: ...
 
     @abc.abstractmethod
-    def pack_header_flags(self, trailers: bool, compressed: bool) -> int:
-        ...
+    def pack_header_flags(self, trailers: bool, compressed: bool) -> int: ...
 
     def set_code(self, code: grpc.StatusCode):
         self._code = code
@@ -170,36 +170,28 @@ class Codec:
         self._timeout = timeout
 
     @abc.abstractmethod
-    def send_request(self, request: Message) -> ClientEvents:
-        ...
+    def send_request(self, request: Message) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def start_request(self) -> ClientEvents:
-        ...
+    def start_request(self) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def end_request(self) -> ClientEvents:
-        ...
+    def end_request(self) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def start_response(self, response: StartResponse) -> ClientEvents:
-        ...
+    def start_response(self, response: StartResponse) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def receive_body(self, body: bytes) -> ClientEvents:
-        ...
+    def receive_body(self, body: bytes) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def server_receive_body(self, body: bytes, more_body: bool) -> ClientEvents:
-        ...
+    def server_receive_body(self, body: bytes, more_body: bool) -> ClientEvents: ...
 
     @abc.abstractmethod
-    def send_response(self, response: Message) -> ServerEvents:
-        ...
+    def send_response(self, response: Message) -> ServerEvents: ...
 
     @abc.abstractmethod
-    def end_response(self) -> ServerEvents:
-        ...
+    def end_response(self) -> ServerEvents: ...
 
     def wrap_message(self, trailers: bool, compressed: bool, message: bytes) -> bytes:
         return (
@@ -211,7 +203,7 @@ class Codec:
             + message
         )
 
-    def unwrap_message(self, message: bytes) -> tuple[bool, bool, bytes, bytes]:
+    def unwrap_message(self, message: bytes) -> typing.Tuple[bool, bool, bytes, bytes]:
         if len(message) < protocol.HEADER_LENGTH:
             raise ValueError()
         flags, length = struct.unpack(
@@ -231,7 +223,7 @@ class Codec:
 
     def unwrap_message_stream(
         self, stream
-    ) -> typing.Iterable[tuple[bool, bool, bytes]]:
+    ) -> typing.Iterable[typing.Tuple[bool, bool, bytes]]:
         data = stream.read(protocol.HEADER_LENGTH)
 
         while data:
@@ -272,13 +264,15 @@ class GrpcCodec(Codec):
             headers=protocol.encode_headers(
                 itertools.chain(
                     (("content-type", self.content_type),),
-                    ()
-                    if self._timeout is None
-                    else (
-                        (
-                            "grpc-timeout",
-                            protocol.serialize_timeout(self._timeout),
-                        ),
+                    (
+                        ()
+                        if self._timeout is None
+                        else (
+                            (
+                                "grpc-timeout",
+                                protocol.serialize_timeout(self._timeout),
+                            ),
+                        )
                     ),
                     self._invocation_metadata,
                 )
@@ -534,12 +528,12 @@ class ConnectCodec(GrpcCodec):
     def pack_header_flags(self, trailers, compressed):
         return (trailers << 1) | (compressed)
 
-    def unpack_error(self) -> dict | None:
+    def unpack_error(self) -> typing.Optional[dict]:
         if self._code == grpc.StatusCode.OK:
             return None
 
         code = protocol.code_to_named_status(self._code)
-        error: dict[str, typing.Any] = {"code": code}
+        error: typing.Dict[str, typing.Any] = {"code": code}
         if self._details:
             error["message"] = self._details
 
@@ -568,9 +562,11 @@ class ConnectCodec(GrpcCodec):
                         ("content-type", self.content_type),
                         ("accept-encoding", self.encoding.encoding),
                     ),
-                    ()
-                    if self._timeout is None
-                    else (("connect-timeout-ms", str(int(self._timeout * 1000))),),
+                    (
+                        ()
+                        if self._timeout is None
+                        else (("connect-timeout-ms", str(int(self._timeout * 1000))),)
+                    ),
                     self._invocation_metadata,
                 )
             ),

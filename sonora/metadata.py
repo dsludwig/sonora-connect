@@ -19,8 +19,8 @@ from .protocol import b64decode
 
 MetadataKey = str
 MetadataValue = typing.Union[str, bytes]
-MetadataList = typing.Iterable[tuple[MetadataKey, MetadataValue]]
-MetadataDict = dict[
+MetadataList = typing.Iterable[typing.Tuple[MetadataKey, MetadataValue]]
+MetadataDict = typing.Dict[
     MetadataKey, typing.Union[MetadataValue, typing.Iterable[MetadataValue]]
 ]
 
@@ -29,7 +29,7 @@ class Metadata(abc.Collection):
     """Deserialized GPRC headers. `-bin` headers are stored in bytes format, not
     base64-encoded."""
 
-    _state: dict[MetadataKey, list[MetadataValue]]
+    _state: typing.Dict[MetadataKey, typing.List[MetadataValue]]
 
     def __init__(
         self, headers: "Metadata | MetadataDict | MetadataList | None" = None
@@ -74,7 +74,7 @@ class Metadata(abc.Collection):
             for key, value in other:
                 self.add(key, value)
 
-    def get_all(self, key: MetadataKey) -> tuple[MetadataValue, ...]:
+    def get_all(self, key: MetadataKey) -> typing.Tuple[MetadataValue, ...]:
         return tuple(self._state.get(self._normalize(key), []))
 
     getlist = get_all
@@ -91,7 +91,7 @@ class Metadata(abc.Collection):
         return key in self._state
 
     # This method is compatible with the expected interface of metadata for grpc.
-    def __iter__(self) -> typing.Iterator[tuple[MetadataKey, MetadataValue]]:  # type: ignore[override]
+    def __iter__(self) -> typing.Iterator[typing.Tuple[MetadataKey, MetadataValue]]:  # type: ignore[override]
         for key, values in self._state.items():
             for value in values:
                 yield (key, value)

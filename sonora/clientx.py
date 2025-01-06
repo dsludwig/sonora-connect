@@ -1,4 +1,5 @@
 import itertools
+import typing
 
 import grpc.experimental.aio
 import httpx
@@ -175,7 +176,7 @@ class StreamStreamMulticallable(sonora.client.Multicallable):
 
 
 class Call(sonora.client.Call):
-    _response: httpx.Response
+    _response: typing.Optional[httpx.Response]
 
     async def __aenter__(self):
         return self

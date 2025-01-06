@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import typing
 
 import aiohttp
 import grpc.experimental.aio
@@ -177,7 +178,7 @@ class StreamStreamMulticallable(sonora.client.Multicallable):
 
 
 class Call(sonora.client.Call):
-    _response: aiohttp.ClientResponse
+    _response: typing.Optional[aiohttp.ClientResponse]
 
     def __enter__(self):
         return self

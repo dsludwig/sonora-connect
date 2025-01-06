@@ -4,7 +4,7 @@ import typing
 class StartResponse(typing.NamedTuple):
     status_code: int
     phrase: str
-    headers: typing.Iterable[tuple[str, str]]
+    headers: typing.Iterable[typing.Tuple[str, str]]
     trailers: bool = False
 
 
@@ -14,20 +14,20 @@ class SendBody(typing.NamedTuple):
 
 
 class SendTrailers(typing.NamedTuple):
-    trailers: typing.Iterable[tuple[str, str]]
+    trailers: typing.Iterable[typing.Tuple[str, str]]
 
 
 class StartRequest(typing.NamedTuple):
     method: str
-    headers: typing.Iterable[tuple[str, str]]
+    headers: typing.Iterable[typing.Tuple[str, str]]
 
 
 class ReceiveInitialMetadata(typing.NamedTuple):
-    headers: typing.Iterable[tuple[str, str | bytes]]
+    headers: typing.Iterable[typing.Tuple[str, typing.Union[str, bytes]]]
 
 
 class ReceiveTrailingMetadata(typing.NamedTuple):
-    headers: typing.Iterable[tuple[str, str | bytes]]
+    headers: typing.Iterable[typing.Tuple[str, typing.Union[str, bytes]]]
 
 
 class ReceiveMessage(typing.NamedTuple):

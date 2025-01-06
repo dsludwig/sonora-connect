@@ -1,6 +1,7 @@
 import functools
 import inspect
 import itertools
+import typing
 from urllib.parse import urljoin
 
 import grpc
@@ -236,6 +237,7 @@ class StreamStreamMulticallable(Multicallable):
 class Call:
     response_streaming: bool
     request_streaming: bool
+    _response: typing.Optional[urllib3.HTTPResponse]
 
     def __init__(
         self,

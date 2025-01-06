@@ -84,10 +84,10 @@ def split_trailers(metadata):
 
 
 def unpack_error_connect(
-    error: dict | None,
+    error: typing.Optional[dict],
     initial_metadata: Metadata,
     trailing_metadata: Metadata,
-    status_code: grpc.StatusCode | None = None,
+    status_code: typing.Optional[grpc.StatusCode] = None,
 ):
     if error is None:
         return
@@ -111,7 +111,7 @@ def unpack_error_connect(
         )
 
     status = status_pb2.Status(
-        code=typing.cast(tuple[int, str], status_code.value)[0],
+        code=typing.cast(typing.Tuple[int, str], status_code.value)[0],
         message=message or "",
     )
     if "details" in error:
