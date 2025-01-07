@@ -4,7 +4,7 @@ workflows:
   test:
     jobs:
       - build-sonora-images
-      - build-grpcweb-images
+      # - build-grpcweb-images
       - test-py38
       - test-py39
       - test-py310
@@ -12,11 +12,11 @@ workflows:
       - interop-grpcweb-wsgi:
           requires:
             - build-sonora-images
-            - build-grpcweb-images
+            # - build-grpcweb-images
       - interop-grpcweb-asgi:
           requires:
             - build-sonora-images
-            - build-grpcweb-images
+            # - build-grpcweb-images
 jobs:
   build-sonora-images:
     docker:
@@ -109,14 +109,14 @@ jobs:
             - .benchmarks
   interop-grpcweb-wsgi:
     docker:
-      - image: $DOCKER_HUB_USER/sonora-grpcweb-interop:$CIRCLE_SHA1
+      - image: public/sonora-grpcweb-interop
       - image: $DOCKER_HUB_USER/sonora-test-wsgi-server:$CIRCLE_SHA1
     steps:
       - run:
           command: /github/grpc-web/scripts/docker-run-interop-tests.sh
   interop-grpcweb-asgi:
     docker:
-      - image: $DOCKER_HUB_USER/sonora-grpcweb-interop:$CIRCLE_SHA1
+      - image: public/sonora-grpcweb-interop
       - image: $DOCKER_HUB_USER/sonora-test-asgi-server:$CIRCLE_SHA1
     steps:
       - run:
