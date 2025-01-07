@@ -1,14 +1,16 @@
 import asyncio
-import base64
+import itertools
+import logging
+import time
 from collections import namedtuple
 from collections.abc import AsyncIterator
-import time
-from urllib.parse import quote
 
+import grpc.aio
 from async_timeout import timeout
-import grpc
 
-from sonora import protocol
+from sonora import _events, protocol
+from sonora._codec import Codec, get_codec
+from sonora.metadata import Metadata
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")
@@ -20,6 +22,7 @@ class grpcASGI(grpc.Server):
         self._application = application
         self._handlers = []
         self._enable_cors = enable_cors
+        self._log = logging.getLogger(__name__)
 
     async def __call__(self, scope, receive, send):
         """
@@ -28,7 +31,10 @@ class grpcASGI(grpc.Server):
         to the next application.
         """
         if not scope["type"] == "http":
-            return await self._application(scope, receive, send)
+            if self._application:
+                return await self._application(scope, receive, send)
+            else:
+                return
 
         rpc_method = self._get_rpc_handler(scope["path"])
         request_method = scope["method"]
@@ -36,19 +42,37 @@ class grpcASGI(grpc.Server):
         if rpc_method:
             if request_method == "POST":
                 context = self._create_context(scope)
+                trailers_supported = (
+                    scope.get("extensions", {}).get("http.response.trailers")
+                    is not None
+                )
+                try:
+                    codec = get_codec(
+                        context.invocation_metadata(),
+                        rpc_method,
+                        enable_trailers=trailers_supported,
+                    )
+                except protocol.InvalidContentType:
+                    # If Content-Type does not begin with "application/grpc", gRPC servers
+                    # SHOULD respond with HTTP status of 415 (Unsupported Media Type). This
+                    # will prevent other HTTP/2 clients from interpreting a gRPC error
+                    # response, which uses status 200 (OK), as successful.
+                    return await send({"type": "http.response.start", "status": 415})
 
                 try:
                     async with timeout(context.time_remaining()):
-                        await self._do_grpc_request(rpc_method, context, receive, send)
+                        await self._do_grpc_request(
+                            rpc_method, context, receive, send, codec
+                        )
                 except asyncio.TimeoutError:
                     context.code = grpc.StatusCode.DEADLINE_EXCEEDED
                     context.details = "request timed out at the server"
-                    await self._do_grpc_error(send, context)
+                    await self._do_grpc_error(send, codec, context)
 
             elif self._enable_cors and request_method == "OPTIONS":
                 await self._do_cors_preflight(scope, receive, send)
             else:
-                await send({"type": "http.response.start", "status": 400})
+                await send({"type": "http.response.start", "status": 405})
                 await send(
                     {"type": "http.response.body", "body": b"", "more_body": False}
                 )
@@ -59,6 +83,52 @@ class grpcASGI(grpc.Server):
         else:
             await send({"type": "http.response.start", "status": 404})
             await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def _do_events(
+        self,
+        headers,
+        send,
+        events,
+    ):
+        for event in events:
+            if isinstance(event, _events.StartResponse):
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": event.status_code,
+                        "headers": list(
+                            itertools.chain(
+                                headers,
+                                (
+                                    (k.encode("ascii"), v.encode("utf-8"))
+                                    for (k, v) in event.headers
+                                ),
+                            )
+                        ),
+                        "trailers": event.trailers,
+                    }
+                )
+            elif isinstance(event, _events.SendBody):
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": event.body,
+                        "more_body": event.more_body,
+                    }
+                )
+            elif isinstance(event, _events.SendTrailers):
+                await send(
+                    {
+                        "type": "http.response.trailers",
+                        "headers": (
+                            (k.encode("ascii"), v.encode("utf-8"))
+                            for (k, v) in event.trailers
+                        ),
+                        "more_trailers": False,
+                    }
+                )
+            else:
+                raise ValueError("Unexpected codec event")
 
     def _get_rpc_handler(self, path):
         handler_call_details = _HandlerCallDetails(path, None)
@@ -73,26 +143,39 @@ class grpcASGI(grpc.Server):
 
     def _create_context(self, scope):
         timeout = None
-        metadata = []
+        metadata = Metadata()
 
         for header, value in scope["headers"]:
             if timeout is None and header == b"grpc-timeout":
                 timeout = protocol.parse_timeout(value)
+            elif timeout is None and header == b"connect-timeout-ms":
+                timeout = int(value) / 1000
             else:
                 if header.endswith(b"-bin"):
-                    value = base64.b64decode(value)
+                    value = protocol.b64decode(value.decode("ascii"))
                 else:
                     value = value.decode("ascii")
 
-                metadata.append((header.decode("ascii"), value))
+                metadata.add(header.decode("ascii"), value)
 
-        return ServicerContext(timeout, metadata, enable_cors=self._enable_cors)
+        return ServicerContext(
+            timeout,
+            metadata,
+            enable_cors=self._enable_cors,
+        )
 
-    async def _do_grpc_request(self, rpc_method, context, receive, send):
-        headers = context._response_headers
-        wrap_message = context._wrap_message
-        unwrap_message = context._unwrap_message
+    async def _receive_body(self, codec: Codec, receive):
+        more_body = True
+        while more_body:
+            event = await receive()
+            assert event["type"].startswith("http.")
+            chunk = event["body"]
+            more_body = event.get("more_body")
+            for e in codec.server_receive_body(chunk, more_body):
+                if isinstance(e, _events.ReceiveMessage):
+                    yield e.message
 
+    async def _do_grpc_request(self, rpc_method, context, receive, send, codec: Codec):
         if not rpc_method.request_streaming and not rpc_method.response_streaming:
             method = rpc_method.unary_unary
         elif not rpc_method.request_streaming and rpc_method.response_streaming:
@@ -104,161 +187,143 @@ class grpcASGI(grpc.Server):
         else:
             raise NotImplementedError
 
-        request_proto_iterator = (
-            rpc_method.request_deserializer(bytes(message))
-            async for _, _, message in unwrap_message(receive)
-        )
+        request_proto_iterator = self._receive_body(codec, receive)
 
+        coroutine = None
         try:
             if rpc_method.request_streaming:
                 coroutine = method(request_proto_iterator, context)
             else:
-                request_proto = await anext(
-                    request_proto_iterator, None
-                ) or rpc_method.request_deserializer(b"")
+                request_proto = await anext(request_proto_iterator, None)
+                if request_proto is None:
+                    raise NotImplementedError()
+                # If more than one request is provided to a unary request,
+                # that is a protocol error.
+                if await anext(request_proto_iterator, None) is not None:
+                    raise NotImplementedError()
                 coroutine = method(request_proto, context)
         except NotImplementedError:
             context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            coroutine = None
+        except protocol.InvalidEncoding:
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        except protocol.ProtocolError:
+            context.set_code(grpc.StatusCode.INTERNAL)
 
         try:
             if rpc_method.response_streaming:
                 await self._do_streaming_response(
-                    rpc_method, receive, send, wrap_message, context, coroutine
+                    rpc_method, receive, send, codec, context, coroutine
                 )
             else:
                 await self._do_unary_response(
-                    rpc_method, receive, send, wrap_message, context, coroutine
+                    rpc_method, receive, send, codec, context, coroutine
                 )
         except grpc.RpcError:
-            await self._do_grpc_error(send, context)
+            await self._do_grpc_error(send, codec, context)
+        except protocol.InvalidEncoding:
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            await self._do_grpc_error(send, codec, context)
+        except protocol.ProtocolError:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            await self._do_grpc_error(send, codec, context)
+        except Exception:
+            self._log.exception("Error in RPC handler")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            await self._do_grpc_error(send, codec, context)
 
     async def _do_streaming_response(
-        self, rpc_method, receive, send, wrap_message, context, coroutine
-    ):
-        headers = context._response_headers
-
-        if coroutine:
-            message = await anext(coroutine)
-        else:
-            message = b""
-
-        status = 200
-
-        body = wrap_message(False, False, rpc_method.response_serializer(message))
-
-        if context._initial_metadata:
-            headers.extend(context._initial_metadata)
-
-        await send(
-            {"type": "http.response.start", "status": status, "headers": headers}
-        )
-
-        await send({"type": "http.response.body", "body": body, "more_body": True})
-
-        async for message in coroutine:
-            body = wrap_message(False, False, rpc_method.response_serializer(message))
-
-            send_task = asyncio.create_task(
-                send({"type": "http.response.body", "body": body, "more_body": True})
-            )
-
-            recv_task = asyncio.create_task(receive())
-
-            done, pending = await asyncio.wait(
-                {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-
-            if recv_task in done:
-                send_task.cancel()
-                result = recv_task.result()
-                if result["type"] == "http.disconnect":
-                    break
-            else:
-                recv_task.cancel()
-
-        trailers = [("grpc-status", str(context.code.value[0]))]
-
-        if context.details:
-            trailers.append(("grpc-message", quote(context.details)))
-
-        if context._trailing_metadata:
-            trailers.extend(context._trailing_metadata)
-
-        trailer_message = protocol.pack_trailers(trailers)
-        body = wrap_message(True, False, trailer_message)
-        await send({"type": "http.response.body", "body": body, "more_body": False})
-
-    async def _do_unary_response(
-        self, rpc_method, receive, send, wrap_message, context, coroutine
+        self, rpc_method, receive, send, codec: Codec, context, coroutine
     ):
         headers = context._response_headers
 
         if coroutine is None:
             message = None
         else:
-            message = await coroutine
-
-        status = 200
+            try:
+                message = await anext(coroutine, default=None)
+            except grpc.RpcError:
+                message = None
 
         if context._initial_metadata:
-            headers.extend(context._initial_metadata)
+            codec.set_initial_metadata(context._initial_metadata)
 
-        if message is not None:
-            message_data = wrap_message(
-                False, False, rpc_method.response_serializer(message)
-            )
-        else:
-            message_data = b""
+        if message:
+            await self._do_events(headers, send, codec.send_response(message))
 
-        trailers = [(b"grpc-status", str(context.code.value[0]).encode())]
+            async for message in coroutine:
+                send_task = asyncio.create_task(
+                    self._do_events(headers, send, codec.send_response(message))
+                )
 
+                recv_task = asyncio.create_task(receive())
+
+                done, pending = await asyncio.wait(
+                    {send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if recv_task in done:
+                    send_task.cancel()
+                    result = recv_task.result()
+                    if result["type"] == "http.disconnect":
+                        break
+                else:
+                    recv_task.cancel()
+
+        codec.set_code(context.code)
         if context.details:
-            trailers.append(
-                (b"grpc-message", quote(context.details.encode("utf8")).encode("ascii"))
-            )
+            codec.set_details(context.details)
 
         if context._trailing_metadata:
-            trailers.extend(context._trailing_metadata)
+            codec.set_trailing_metadata(context._trailing_metadata)
 
-        trailer_message = protocol.pack_trailers(trailers)
-        trailer_data = wrap_message(True, False, trailer_message)
+        await self._do_events(headers, send, codec.end_response())
 
-        content_length = len(message_data) + len(trailer_data)
-
-        headers.append((b"content-length", str(content_length).encode()))
-
-        await send(
-            {"type": "http.response.start", "status": status, "headers": headers}
-        )
-
-        await send(
-            {"type": "http.response.body", "body": message_data, "more_body": True}
-        )
-
-        await send(
-            {"type": "http.response.body", "body": trailer_data, "more_body": False}
-        )
-
-    async def _do_grpc_error(self, send, context):
-        status = 200
+    async def _do_unary_response(
+        self, rpc_method, receive, send, codec: Codec, context, coroutine
+    ):
         headers = context._response_headers
-        headers.append((b"grpc-status", str(context.code.value[0]).encode()))
 
+        if coroutine is None:
+            message = None
+
+        else:
+            try:
+                message = await coroutine
+            except grpc.RpcError:
+                message = None
+
+        codec.set_code(context.code)
         if context.details:
-            headers.append(
-                (b"grpc-message", quote(context.details.encode("utf8")).encode("ascii"))
-            )
+            codec.set_details(context.details)
 
-        await send(
-            {"type": "http.response.start", "status": status, "headers": headers}
-        )
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+        if context._initial_metadata:
+            codec.set_initial_metadata(context._initial_metadata)
+
+        if context._trailing_metadata:
+            codec.set_trailing_metadata(context._trailing_metadata)
+
+        if message:
+            await self._do_events(headers, send, codec.send_response(message))
+
+        await self._do_events(headers, send, codec.end_response())
+
+    async def _do_grpc_error(self, send, codec: Codec, context):
+        headers = context._response_headers
+
+        codec.set_code(context.code)
+        codec.set_details(context.details)
+        if context._initial_metadata:
+            codec.set_initial_metadata(context._initial_metadata)
+
+        if context._trailing_metadata:
+            codec.set_trailing_metadata(context._trailing_metadata)
+
+        return await self._do_events(headers, send, codec.end_response())
 
     async def _do_cors_preflight(self, scope, receive, send):
         origin = next(
-            (value for header, value in scope["headers"] if header == "host"),
-            scope["server"][0],
+            (value for header, value in scope["headers"] if header == b"origin"),
+            scope["server"][0].encode("ascii"),
         )
 
         await send(
@@ -294,12 +359,13 @@ class grpcASGI(grpc.Server):
         raise NotImplementedError()
 
 
-class ServicerContext(grpc.ServicerContext):
+class ServicerContext(grpc.aio.ServicerContext):
     def __init__(self, timeout=None, metadata=None, enable_cors=True):
         self.code = grpc.StatusCode.OK
         self.details = None
 
         self._timeout = timeout
+        self._status_code = 200
 
         if timeout is not None:
             self._deadline = time.monotonic() + timeout
@@ -310,32 +376,23 @@ class ServicerContext(grpc.ServicerContext):
         self._initial_metadata = None
         self._trailing_metadata = None
 
-        response_content_type = "application/grpc-web+proto"
-
-        self._wrap_message = protocol.wrap_message
-        self._unwrap_message = protocol.unwrap_message_asgi
         origin = None
+        host = None
 
         for header, value in metadata:
-            if header == "content-type":
-                if value == "application/grpc-web-text":
-                    self._wrap_message = protocol.b64_wrap_message
-                    self._unwrap_message = protocol.b64_unwrap_message_asgi
-            elif header == "accept":
-                response_content_type = value.split(",")[0].strip()
-            elif header == "host":
+            if header == "origin":
                 origin = value
+            elif header == "host":
+                host = value
 
-        if not origin:
+        if not host:
             raise ValueError("Request is missing the host header")
 
-        self._response_headers = [
-            (b"Content-Type", response_content_type.encode("ascii")),
-        ]
+        self._response_headers = []
 
         if enable_cors:
             self._response_headers += [
-                (b"Access-Control-Allow-Origin", origin.encode("ascii")),
+                (b"Access-Control-Allow-Origin", (origin or host).encode("ascii")),
                 (b"Access-Control-Expose-Headers", b"*"),
             ]
 
@@ -367,22 +424,25 @@ class ServicerContext(grpc.ServicerContext):
 
         raise grpc.RpcError()
 
-    async def abort_with_status(self, status):
-        if status == grpc.StatusCode.OK:
-            raise ValueError()
+    async def abort_with_status(self, status: grpc.Status):
+        if status.code == grpc.StatusCode.OK:
+            self.set_code(grpc.StatusCode.UNKNOWN)
+            raise grpc.RpcError()
 
-        self.set_code(status)
+        self.set_code(status.code)
+        self.set_details(status.details)
+        if self._trailing_metadata is None:
+            self.set_trailing_metadata(Metadata(status.trailing_metadata))
+        else:
+            self._trailing_metadata.extend(status.trailing_metadata)
 
         raise grpc.RpcError()
 
     async def send_initial_metadata(self, initial_metadata):
-        self._initial_metadata = [
-            (key.encode("ascii"), value.encode("utf8"))
-            for key, value in protocol.encode_headers(initial_metadata)
-        ]
+        self._initial_metadata = Metadata(initial_metadata)
 
     def set_trailing_metadata(self, trailing_metadata):
-        self._trailing_metadata = protocol.encode_headers(trailing_metadata)
+        self._trailing_metadata = Metadata(trailing_metadata)
 
     def invocation_metadata(self):
         return self._invocation_metadata
@@ -392,6 +452,18 @@ class ServicerContext(grpc.ServicerContext):
             return max(self._deadline - time.monotonic(), 0)
         else:
             return None
+
+    async def read(self):
+        raise NotImplementedError()
+
+    async def write(self, message):
+        raise NotImplementedError()
+
+    def set_compression(self, compression):
+        raise NotImplementedError()
+
+    def disable_next_message_compression(self):
+        raise NotImplementedError()
 
     def peer(self):
         raise NotImplementedError()

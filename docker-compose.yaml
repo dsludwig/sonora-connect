@@ -4,7 +4,7 @@ services:
     build:
         context: .
         target: wsgi
-    image: public/sonora-test-wsgi-server
+    image: sonora-test-wsgi-server
     volumes:
         - ".:/usr/src/app"
     networks:
@@ -17,14 +17,14 @@ services:
     build:
         context: .
         target: asgi
-    image: public/sonora-test-asgi-server
+    image: sonora-test-asgi-server
     volumes:
         - ".:/usr/src/app"
     networks:
       interop:
         aliases:
           - server
-          
+
   interop-grpcweb:
     image: grpcweb/prereqs
     entrypoint: /github/grpc-web/scripts/docker-run-interop-tests.sh

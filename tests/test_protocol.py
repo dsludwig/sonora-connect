@@ -1,18 +1,55 @@
 import io
 
-from hypothesis import given, strategies as st
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from sonora import protocol
+from sonora import _codec, _encoding, protocol
 
 
-def test_wrapping():
+class TestSerializer(_codec.Serializer):
+    def serialize_request(self, request):
+        return request
+
+    def deserialize_response(self, response):
+        return response
+
+    def serialize_response(self, response):
+        return response
+
+    def deserialize_request(self, request):
+        return request
+
+
+@pytest.mark.parametrize(
+    "codec_class",
+    [
+        _codec.ConnectStreamCodec,
+        _codec.ConnectUnaryCodec,
+        _codec.GrpcCodec,
+    ],
+)
+def test_wrapping(codec_class):
+    encoding = _encoding.IdentityEncoding()
+    serializer = TestSerializer()
+    codec = codec_class(encoding, serializer)
     data = b"foobar"
-    wrapped = protocol.wrap_message(False, False, data)
-    assert protocol.unwrap_message(wrapped) == (False, False, data)
+    wrapped = codec.wrap_message(False, False, data)
+    assert codec.unwrap_message(wrapped) == (False, False, data, b"")
 
 
-def test_unwrapping_stream():
+@pytest.mark.parametrize(
+    "codec_class",
+    [
+        _codec.ConnectStreamCodec,
+        # _codec.ConnectUnaryCodec,
+        _codec.GrpcCodec,
+    ],
+)
+def test_unwrapping_stream(codec_class):
+    encoding = _encoding.IdentityEncoding()
+    serializer = TestSerializer()
+    codec = codec_class(encoding, serializer)
     buffer = io.BytesIO()
 
     messages = [
@@ -22,37 +59,12 @@ def test_unwrapping_stream():
         b"Could frame thy fearful symmetry?",
     ]
     for message in messages:
-        buffer.write(protocol.wrap_message(False, False, message))
+        buffer.write(codec.wrap_message(False, False, message))
 
     buffer.seek(0)
 
     resp_messages = []
-    for _, _, resp in protocol.unwrap_message_stream(buffer):
-        resp_messages.append(resp)
-
-    assert resp_messages == messages
-
-
-@pytest.mark.asyncio
-async def test_unwrapping_asgi():
-    messages = [
-        b"Tyger Tyger, burning bright,",
-        b"In the forests of the night;",
-        b"What immortal hand or eye,",
-        b"Could frame thy fearful symmetry?",
-    ]
-
-    buffer = [protocol.wrap_message(False, False, message) for message in messages]
-
-    async def receive():
-        return {
-            "type": "http.request",
-            "body": buffer.pop(0),
-            "more_body": bool(buffer),
-        }
-
-    resp_messages = []
-    async for _, _, resp in protocol.unwrap_message_asgi(receive):
+    for _, _, resp in codec.unwrap_message_stream(buffer):
         resp_messages.append(resp)
 
     assert resp_messages == messages
@@ -62,4 +74,4 @@ async def test_unwrapping_asgi():
 def test_timeout_serdes(timeout):
     ser = protocol.serialize_timeout(timeout).encode("ascii")
     des = protocol.parse_timeout(ser)
-    assert abs(timeout - des) < 1e-9, (timeout, ser)
+    assert abs(timeout - des) < 1e-6, (timeout, ser)

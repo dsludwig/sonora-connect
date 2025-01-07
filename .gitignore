@@ -1,4 +1,5 @@
 .*
+test_server/*_pb2*.py
 tests/*_pb2*.py
 __pycache__/*
 *.egg-info

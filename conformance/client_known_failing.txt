@@ -1,0 +1,8 @@
+# Cancellation is not supported yet
+Client Cancellation/**
+
+# This test expects "internal" instead of "unknown". This would add an extra
+# code path just to produce a more specific error in the case of streaming
+# requests than the already clear "Unexpected content-type" message. Let's skip
+# this for now.
+Connect Unexpected Responses/**/unexpected-stream-codec

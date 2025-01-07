@@ -1,9 +1,6 @@
-import asyncio
-
 import pytest
 
-import sonora.aio
-from tests import benchmark_pb2, benchmark_pb2_grpc
+from tests import benchmark_pb2
 
 
 @pytest.mark.parametrize("size", [1, 100, 10000, 1000000])
@@ -23,7 +20,6 @@ def test_asgi_unarycall(asgi_benchmark, benchmark, event_loop, size):
 
 @pytest.mark.parametrize("size", [1, 100, 10000, 1000000])
 def test_asgi_streamingfromserver(asgi_benchmark, event_loop, benchmark, size):
-
     chunk_count = 10
 
     request = benchmark_pb2.SimpleRequest(response_size=size)
@@ -41,6 +37,7 @@ def test_asgi_streamingfromserver(asgi_benchmark, event_loop, benchmark, size):
                     break
 
         assert recv_bytes == size * chunk_count
+        assert n == chunk_count
 
     def perf():
         event_loop.run_until_complete(run())

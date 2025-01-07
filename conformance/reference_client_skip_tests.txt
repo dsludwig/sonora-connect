@@ -1,0 +1,7 @@
+# This causes the grpc client to hang with versions:
+# googleapis-common-protos==1.65.0
+# grpc-stubs==1.53.0.5
+# grpcio==1.62.3
+# grpcio-status==1.62.3
+# grpcio-tools==1.62.3
+gRPC Unexpected Responses/**/multiple-responses

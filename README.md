@@ -1,8 +1,10 @@
-[![CircleCI](https://circleci.com/gh/public/sonora.svg?style=svg)](https://circleci.com/gh/public/sonora)
+[![CircleCI](https://circleci.com/gh/dsludwig/sonora-connect.svg?style=svg)](https://circleci.com/gh/dsludwig/sonora-connect)
 
-# Sonora
+# Sonora-Connect
 
-Sonora is a Python-first implementation of gRPC-Web built on top of standard Python APIs like [WSGI](https://wsgi.readthedocs.io/en/latest/what.html) and [ASGI](https://asgi.readthedocs.io/en/latest/) for easy integration.
+Sonora-Connect is a Python-first implementation of gRPC, gRPC-Web and [Connect](https://connectrpc.com/) built on top of standard Python APIs like [WSGI](https://wsgi.readthedocs.io/en/latest/what.html) and [ASGI](https://asgi.readthedocs.io/en/latest/) for easy integration.
+
+Sonora-Connect is a fork of the [Sonora](https://github.com/public/sonora/) project which implements gRPC-Web.
 
 ## Why?
 
@@ -29,6 +31,14 @@ The name Sonora was inspired by the [Sonoran gopher snake](https://en.wikipedia.
 Sonora is designed to require minimal changes to an existing Python application.
 
 ### Server
+
+#### Protocol Negotiation
+
+Sonora-Connect provides seamless support for GRPC, GRPC-Web and Connect protocols on a
+single port. The protocol is automatically selected based on the request `Content-Type`.
+GRPC is supported only if your ASGI server implements the [`http.response.trailers` extension](https://asgi.readthedocs.io/en/latest/extensions.html#http-trailers).
+
+> Note: the only ASGI server that supports trailers as of 2025-01-06 seems to be [nonecorn](https://github.com/nonebot/nonecorn)
 
 #### WSGI
 

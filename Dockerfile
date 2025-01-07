@@ -5,19 +5,19 @@ WORKDIR /usr/src/app
 RUN apt update && \
     apt install -y build-essential libev-dev
 
-ENV POETRY_VERSION=1.1.5
-RUN curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | python -
-ENV PATH="${PATH}:/root/.poetry/bin"
+ENV POETRY_VERSION=1.8.4
+RUN curl -sSL https://install.python-poetry.org | python -
+ENV PATH="${PATH}:/root/.local/bin"
 
 COPY . .
 
 RUN poetry install
 
 RUN poetry run python -m grpc.tools.protoc \
-        --proto_path="$(pwd)/" \
-        --python_out=. \
-        --grpc_python_out=. \
-        "$(pwd)"/test_server/*.proto
+    --proto_path="$(pwd)/" \
+    --python_out=. \
+    --grpc_python_out=. \
+    "$(pwd)"/test_server/*.proto
 
 FROM base AS wsgi
 

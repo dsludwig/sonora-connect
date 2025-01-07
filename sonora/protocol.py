@@ -1,138 +1,60 @@
-import base64
-import functools
+import json
 import struct
+import typing
 from urllib.parse import unquote
 
 import grpc
+from google.protobuf import any_pb2, json_format
+
+if typing.TYPE_CHECKING:
+    from sonora import _status_pb2 as status_pb2
+else:
+    from google.rpc import status_pb2
+from grpc_status import rpc_status
+
+from sonora.encode import b64decode, b64encode
+from sonora.metadata import Metadata
+
+HEADER_FORMAT = ">BI"
+HEADER_LENGTH = struct.calcsize(HEADER_FORMAT)
 
 
-_HEADER_FORMAT = ">BI"
-_HEADER_LENGTH = struct.calcsize(_HEADER_FORMAT)
+class ProtocolError(Exception):
+    pass
 
 
-def _pack_header_flags(trailers, compressed):
-    return (trailers << 7) | (compressed)
+class InvalidContentType(ProtocolError):
+    pass
 
 
-def _unpack_header_flags(flags):
-    trailers = 1 << 7
-    compressed = 1
-
-    return bool(trailers & flags), bool(compressed & flags)
+class InvalidEncoding(ProtocolError):
+    pass
 
 
-def wrap_message(trailers, compressed, message):
-    return (
-        struct.pack(
-            _HEADER_FORMAT, _pack_header_flags(trailers, compressed), len(message)
-        )
-        + message
-    )
-
-
-def b64_wrap_message(trailers, compressed, message):
-    return base64.b64encode(wrap_message(trailers, compressed, message))
-
-
-def unwrap_message(message):
-    flags, length = struct.unpack(_HEADER_FORMAT, message[:_HEADER_LENGTH])
-    data = message[_HEADER_LENGTH : _HEADER_LENGTH + length]
-
-    if length != len(data):
-        raise ValueError()
-
-    trailers, compressed = _unpack_header_flags(flags)
-
-    return trailers, compressed, data
-
-
-def b64_unwrap_message(message):
-    return unwrap_message(base64.b64decode(message))
-
-
-def unwrap_message_stream(stream):
-    data = stream.read(_HEADER_LENGTH)
-
-    while data:
-        flags, length = struct.unpack(_HEADER_FORMAT, data)
-        trailers, compressed = _unpack_header_flags(flags)
-
-        yield trailers, compressed, stream.read(length)
-
-        if trailers:
-            break
-
-        data = stream.read(_HEADER_LENGTH)
-
-
-async def unwrap_message_stream_async(stream):
-    data = await stream.readexactly(_HEADER_LENGTH)
-
-    while data:
-        flags, length = struct.unpack(_HEADER_FORMAT, data)
-        trailers, compressed = _unpack_header_flags(flags)
-
-        yield trailers, compressed, await stream.readexactly(length)
-
-        if trailers:
-            break
-
-        data = await stream.readexactly(_HEADER_LENGTH)
-
-
-async def unwrap_message_asgi(receive, decoder=None):
-    buffer = bytearray()
-    waiting = False
-    flags = None
-    length = None
-
-    while True:
-        event = await receive()
-        assert event["type"].startswith("http.")
-
-        if decoder:
-            chunk = decoder(event["body"])
-        else:
-            chunk = event["body"]
-
-        buffer += chunk
-
-        if len(buffer) >= _HEADER_LENGTH:
-            if not waiting:
-                flags, length = struct.unpack(_HEADER_FORMAT, buffer[:_HEADER_LENGTH])
-
-            if len(buffer) >= _HEADER_LENGTH + length:
-                waiting = False
-                data = buffer[_HEADER_LENGTH : _HEADER_LENGTH + length]
-                trailers, compressed = _unpack_header_flags(flags)
-
-                yield trailers, compressed, data
-                buffer = buffer[_HEADER_LENGTH + length :]
-            else:
-                waiting = True
-
-        if not event.get("more_body"):
-            break
-
-
-b64_unwrap_message_asgi = functools.partial(
-    unwrap_message_asgi, decoder=base64.b64decode
-)
+def decode_identity(compressed, message):
+    if compressed:
+        raise ProtocolError("Cannot decode compressed message with `identity` encoder")
+    return message
 
 
 def pack_trailers(trailers):
-    message = []
+    data = bytearray()
     for k, v in trailers:
         k = k.lower()
-        message.append(f"{k}: {v}\r\n".encode("ascii"))
-    return b"".join(message)
+        data.extend(k.encode("utf8"))
+        data.extend(b": ")
+        data.extend(v.encode("utf8"))
+        data.extend(b"\r\n")
+    return bytes(data)
 
 
-def unpack_trailers(message):
+def unpack_trailers(message, _initial_metadata=None):
     trailers = []
     for line in message.decode("ascii").splitlines():
         k, v = line.split(":", 1)
         v = v.strip()
+        if k.endswith("-bin"):
+            v = b64decode(v)
 
         trailers.append((k, v))
     return trailers
@@ -144,36 +66,212 @@ def encode_headers(metadata):
             if not header.endswith("-bin"):
                 raise ValueError("binary headers must have the '-bin' suffix")
 
-            value = base64.b64encode(value).decode("ascii")
-
-        if isinstance(header, bytes):
-            header = header.decode("ascii")
+            value = b64encode(value)
 
         yield header, value
+
+
+def split_trailers(metadata):
+    initial_metadata = Metadata()
+    trailing_metadata = Metadata()
+    for header, value in metadata:
+        if header.startswith("trailer-"):
+            _, _, header = header.partition("trailer-")
+            trailing_metadata.add(header, value)
+        else:
+            initial_metadata.add(header, value)
+    return initial_metadata, trailing_metadata
+
+
+def unpack_error_connect(
+    error: typing.Optional[dict],
+    initial_metadata: Metadata,
+    trailing_metadata: Metadata,
+    status_code: typing.Optional[grpc.StatusCode] = None,
+):
+    if error is None:
+        return
+        # raise WebRpcError(
+        #     code=grpc.StatusCode.INTERNAL,
+        #     details="Invalid error message",
+        # )
+    code = error.get("code")
+    if code is not None and code in _STATUS_CODE_NAME_MAP:
+        status_code = named_status_to_code(code)
+    if status_code is None or status_code == grpc.StatusCode.OK:
+        status_code = grpc.StatusCode.INTERNAL
+
+    message = error.get("message")
+    if message is not None and not isinstance(message, str):
+        raise WebRpcError(
+            code=grpc.StatusCode.INTERNAL,
+            details=f"Invalid error message: {message!r}",
+            initial_metadata=Metadata(initial_metadata),
+            trailing_metadata=trailing_metadata,
+        )
+
+    status = status_pb2.Status(
+        code=typing.cast(typing.Tuple[int, str], status_code.value)[0],
+        message=message or "",
+    )
+    if "details" in error:
+        for detail in error["details"]:
+            any = any_pb2.Any(
+                type_url=f'type.googleapis.com/{detail["type"]}',
+                value=b64decode(detail["value"]),
+            )
+            status.details.append(any)
+
+    status_message = rpc_status.to_status(status)
+    code = status_message.code
+    message = status_message.details
+    status_trailing_metadata = status_message.trailing_metadata
+    if trailing_metadata is None:
+        trailing_metadata = status_trailing_metadata
+    else:
+        trailing_metadata.extend(status_trailing_metadata)
+    raise WebRpcError(
+        code=code,
+        details=message,
+        initial_metadata=Metadata(initial_metadata),
+        trailing_metadata=trailing_metadata,
+    )
+
+
+def unpack_trailers_connect(response, initial_metadata):
+    response = json.loads(response)
+    trailing_metadata = None
+    if "metadata" in response:
+        trailing_metadata = Metadata(response["metadata"])
+    if "error" in response:
+        error = response["error"]
+        unpack_error_connect(
+            error,
+            initial_metadata,
+            trailing_metadata,
+            status_code=grpc.StatusCode.UNKNOWN,
+        )
+
+    return trailing_metadata
+
+
+def deserialize_json(request_deserializer):
+    klass = request_deserializer.__self__
+
+    def deserializer(buffer):
+        message = klass()
+        return json_format.Parse(buffer, message)
+
+    return deserializer
+
+
+def serialize_json(response_serializer):
+    def serializer(message):
+        return json_format.MessageToJson(message).encode()
+
+    return serializer
+
+
+_STATUS_CODE_MAP = {
+    grpc.StatusCode.OK: 200,
+    grpc.StatusCode.CANCELLED: 499,
+    grpc.StatusCode.UNKNOWN: 500,
+    grpc.StatusCode.INVALID_ARGUMENT: 400,
+    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+    grpc.StatusCode.NOT_FOUND: 404,
+    grpc.StatusCode.ALREADY_EXISTS: 409,
+    grpc.StatusCode.PERMISSION_DENIED: 403,
+    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
+    grpc.StatusCode.FAILED_PRECONDITION: 400,
+    grpc.StatusCode.ABORTED: 409,
+    grpc.StatusCode.OUT_OF_RANGE: 400,
+    grpc.StatusCode.UNIMPLEMENTED: 501,
+    grpc.StatusCode.INTERNAL: 500,
+    grpc.StatusCode.UNAVAILABLE: 503,
+    grpc.StatusCode.DATA_LOSS: 500,
+    grpc.StatusCode.UNAUTHENTICATED: 401,
+}
+_STATUS_CODE_HTTP_MAP = {
+    200: grpc.StatusCode.OK,
+    400: grpc.StatusCode.INTERNAL,
+    401: grpc.StatusCode.UNAUTHENTICATED,
+    403: grpc.StatusCode.PERMISSION_DENIED,
+    404: grpc.StatusCode.UNIMPLEMENTED,
+    429: grpc.StatusCode.UNAVAILABLE,
+    502: grpc.StatusCode.UNAVAILABLE,
+    503: grpc.StatusCode.UNAVAILABLE,
+    504: grpc.StatusCode.UNAVAILABLE,
+}
+_STATUS_CODE_NAME_MAP = {
+    status_code.name.lower(): status_code for status_code in grpc.StatusCode
+}
+# ConnectRPC uses a different name.
+_STATUS_CODE_NAME_MAP["canceled"] = grpc.StatusCode.CANCELLED
+_NAME_CODE_MAP = {value: key for key, value in _STATUS_CODE_NAME_MAP.items()}
+
+
+def status_code_to_http(status_code):
+    return _STATUS_CODE_MAP.get(status_code, 500)
+
+
+def http_status_to_status_code(status: int) -> grpc.StatusCode:
+    return _STATUS_CODE_HTTP_MAP.get(status, grpc.StatusCode.UNKNOWN)
+
+
+def named_status_to_code(name: str) -> grpc.StatusCode:
+    return _STATUS_CODE_NAME_MAP.get(name, grpc.StatusCode.UNKNOWN)
+
+
+def code_to_named_status(code: grpc.StatusCode) -> str:
+    return _NAME_CODE_MAP.get(code, "unknown")
 
 
 class WebRpcError(grpc.RpcError):
     _code_to_enum = {code.value[0]: code for code in grpc.StatusCode}  # type: ignore
 
-    def __init__(self, code, details, *args, **kwargs):
+    def __init__(
+        self,
+        code,
+        details,
+        *args,
+        initial_metadata=None,
+        trailing_metadata=None,
+        **kwargs,
+    ):
         super(WebRpcError, self).__init__(*args, **kwargs)
 
         self._code = code
         self._details = details
+        self._initial_metadata = initial_metadata or []
+        self._trailing_metadata = trailing_metadata or []
 
     @classmethod
     def from_metadata(cls, trailers):
         status = int(trailers["grpc-status"])
         details = trailers.get("grpc-message")
+        details = unquote(details) if details else details
 
         code = cls._code_to_enum[status]
 
-        return cls(code, details)
+        return cls(
+            code,
+            details,
+            trailing_metadata=trailers,
+        )
 
     def __str__(self):
         return "WebRpcError(status_code={}, details='{}')".format(
             self._code, self._details
         )
+
+    def http_status_code(self):
+        return 200
+
+    def initial_metadata(self):
+        return self._initial_metadata
+
+    def trailing_metadata(self):
+        return self._trailing_metadata
 
     def code(self):
         return self._code
@@ -182,11 +280,25 @@ class WebRpcError(grpc.RpcError):
         return self._details
 
 
-def raise_for_status(headers, trailers=None):
+def raise_for_status(headers, trailers=None, expected_content_types=[]):
     if trailers:
-        metadata = dict(trailers)
+        # prioritize trailers over headers
+        metadata = Metadata(trailers)
+        metadata.extend(headers)
     else:
-        metadata = headers
+        metadata = Metadata(headers)
+
+    if (
+        "content-type" in metadata
+        and metadata["content-type"] not in expected_content_types
+    ):
+        raise WebRpcError(
+            grpc.StatusCode.UNKNOWN,
+            "Invalid content-type",
+        )
+
+    if headers is not None and trailers is not None and "grpc-status" not in metadata:
+        raise WebRpcError(grpc.StatusCode.INTERNAL, "Missing grpc-status header")
 
     if "grpc-status" in metadata and metadata["grpc-status"] != "0":
         metadata = metadata.copy()
@@ -194,7 +306,34 @@ def raise_for_status(headers, trailers=None):
         if "grpc-message" in metadata:
             metadata["grpc-message"] = unquote(metadata["grpc-message"])
 
-        raise WebRpcError.from_metadata(metadata)
+        status = int(metadata["grpc-status"])
+        details = metadata.get("grpc-message")
+        code = WebRpcError._code_to_enum[status]
+
+        raise WebRpcError(
+            code,
+            details,
+            initial_metadata=Metadata(headers) if trailers else None,
+            trailing_metadata=Metadata(trailers) if trailers else Metadata(headers),
+        )
+
+
+def raise_for_status_connect(headers, trailers=None, expected_content_types=[]):
+    if trailers:
+        # prioritize trailers over headers
+        metadata = Metadata(trailers)
+        metadata.extend(headers)
+    else:
+        metadata = Metadata(headers)
+
+    if (
+        "content-type" in metadata
+        and metadata["content-type"] not in expected_content_types
+    ):
+        raise WebRpcError(
+            grpc.StatusCode.UNKNOWN,
+            "Invalid content-type",
+        )
 
 
 _timeout_units = {
@@ -204,6 +343,12 @@ _timeout_units = {
     b"m": 1 / 1000.0,
     b"u": 1 / 1000000.0,
     b"n": 1 / 1000000000.0,
+    "H": 3600.0,
+    "M": 60.0,
+    "S": 1.0,
+    "m": 1 / 1000.0,
+    "u": 1 / 1000000.0,
+    "n": 1 / 1000000000.0,
 }
 
 

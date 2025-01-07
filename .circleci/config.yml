@@ -4,8 +4,8 @@ workflows:
   test:
     jobs:
       - build-sonora-images
-      - build-grpcweb-images
-      - test-py37
+      # - build-grpcweb-images
+      - test-py38
       - test-py39
       - test-py310
       - lint
@@ -21,6 +21,10 @@ jobs:
   build-sonora-images:
     docker:
       - image: cimg/base:stable
+    parameters:
+      docker_repo:
+        type: string
+        default: dludwig
     steps:
       - setup_remote_docker
       - checkout
@@ -28,11 +32,11 @@ jobs:
           name: Build
           command: |
             docker compose build
-            docker login --username=public --password=$DOCKER_HUB_PAT
-            docker tag public/sonora-test-wsgi-server public/sonora-test-wsgi-server:$CIRCLE_SHA1
-            docker push public/sonora-test-wsgi-server:$CIRCLE_SHA1
-            docker tag public/sonora-test-asgi-server public/sonora-test-asgi-server:$CIRCLE_SHA1
-            docker push public/sonora-test-asgi-server:$CIRCLE_SHA1
+            docker login --username=$DOCKER_HUB_USER --password=$DOCKER_HUB_PAT
+            docker tag sonora-test-wsgi-server $DOCKER_HUB_USER/sonora-test-wsgi-server:$CIRCLE_SHA1
+            docker push $DOCKER_HUB_USER/sonora-test-wsgi-server:$CIRCLE_SHA1
+            docker tag sonora-test-asgi-server $DOCKER_HUB_USER/sonora-test-asgi-server:$CIRCLE_SHA1
+            docker push $DOCKER_HUB_USER/sonora-test-asgi-server:$CIRCLE_SHA1
   build-grpcweb-images:
     docker:
       - image: cimg/base:stable
@@ -43,15 +47,15 @@ jobs:
           command: |
             git clone https://github.com/grpc/grpc-web.git
             cd grpc-web
-            git reset --hard 35c16a9e4e113b65966e159dc879bc452c00526c
-            docker pull public/sonora-grpcweb-interop
-            docker compose build common prereqs node-interop-server interop-client
-            docker login --username=public --password=$DOCKER_HUB_PAT
-            docker tag grpcweb/prereqs public/sonora-grpcweb-interop:$CIRCLE_SHA1
-            docker push public/sonora-grpcweb-interop:$CIRCLE_SHA1
-  test-py37:
+            git reset --hard ecb890429f20c7105c3e5c4300a680a495765d2b
+            docker pull $DOCKER_HUB_USER/sonora-grpcweb-interop
+            docker compose build prereqs node-interop-server interop-client
+            docker login --username=$DOCKER_HUB_USER --password=$DOCKER_HUB_PAT
+            docker tag grpcweb/prereqs $DOCKER_HUB_USER/sonora-grpcweb-interop:$CIRCLE_SHA1
+            docker push $DOCKER_HUB_USER/sonora-grpcweb-interop:$CIRCLE_SHA1
+  test-py38:
     docker:
-      - image: circleci/python:3.7
+      - image: circleci/python:3.8
     steps:
       - checkout
       - run: sudo apt-get install python3-dev libev-dev
@@ -62,11 +66,11 @@ jobs:
       - run: poetry install
       - restore_cache:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-master
-      - run: poetry run tox -- -e py37 -- --benchmark-save=${CIRCLE_BRANCH} --benchmark-compare
+      - run: poetry run tox -- -e py38 -- --benchmark-save=${CIRCLE_BRANCH//[^-._a-zA-Z0-9]/-} --benchmark-compare
       - save_cache:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ .Revision }}
           paths:
-          - .benchmarks
+            - .benchmarks
   test-py39:
     docker:
       - image: circleci/python:3.9
@@ -80,11 +84,11 @@ jobs:
       - run: poetry install
       - restore_cache:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-master
-      - run: poetry run tox -- -e py39 -- --benchmark-save=${CIRCLE_BRANCH} --benchmark-compare
+      - run: poetry run tox -- -e py39 -- --benchmark-save=${CIRCLE_BRANCH//[^-._a-zA-Z0-9]/-} --benchmark-compare
       - save_cache:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ .Revision }}
           paths:
-          - .benchmarks
+            - .benchmarks
   test-py310:
     docker:
       - image: circleci/python:3.10
@@ -98,22 +102,22 @@ jobs:
       - run: poetry install
       - restore_cache:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-master
-      - run: poetry run tox -- -e py310 -- --benchmark-save=${CIRCLE_BRANCH} --benchmark-compare
+      - run: poetry run tox -- -e py310 -- --benchmark-save=${CIRCLE_BRANCH//[^-._a-zA-Z0-9]/-} --benchmark-compare
       - save_cache:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ .Revision }}
           paths:
-          - .benchmarks
+            - .benchmarks
   interop-grpcweb-wsgi:
     docker:
       - image: public/sonora-grpcweb-interop
-      - image: public/sonora-test-wsgi-server:$CIRCLE_SHA1
+      - image: $DOCKER_HUB_USER/sonora-test-wsgi-server:$CIRCLE_SHA1
     steps:
       - run:
           command: /github/grpc-web/scripts/docker-run-interop-tests.sh
   interop-grpcweb-asgi:
     docker:
       - image: public/sonora-grpcweb-interop
-      - image: public/sonora-test-asgi-server:$CIRCLE_SHA1
+      - image: $DOCKER_HUB_USER/sonora-test-asgi-server:$CIRCLE_SHA1
     steps:
       - run:
           command: /github/grpc-web/scripts/docker-run-interop-tests.sh

@@ -1,21 +1,19 @@
-import asyncio
 import itertools
 import typing
 
-import aiohttp
 import grpc.experimental.aio
+import httpx
 
 import sonora.client
 from sonora import _codec, _encoding, _events, protocol
-from sonora.metadata import Metadata
 
 
-def insecure_web_channel(url, session_kws=None, json=False):
-    return WebChannel(url, session_kws, json=json)
+def insecure_web_channel(url, client_kws=None, json=False):
+    return WebChannel(url, client_kws, json=json)
 
 
-def insecure_connect_channel(url, session_kws=None, json=False):
-    return WebChannel(url, session_kws, connect=True, json=json)
+def insecure_connect_channel(url, client_kws=None, json=False):
+    return WebChannel(url, client_kws, connect=True, json=json)
 
 
 async def body_generator(events: _events.ClientEvents):
@@ -27,15 +25,15 @@ async def body_generator(events: _events.ClientEvents):
 
 
 class WebChannel:
-    def __init__(self, url, session_kws=None, connect=False, json=False):
+    def __init__(self, url, client_kws=None, connect=False, json=False):
         if not url.startswith("http") and "://" not in url:
             url = f"http://{url}"
 
         self._url = url
-        if session_kws is None:
-            session_kws = {}
+        if client_kws is None:
+            client_kws = {}
 
-        self._session = aiohttp.ClientSession(**session_kws)
+        self._session = httpx.AsyncClient(**client_kws)
         self._connect = connect
         self._json = json
 
@@ -43,7 +41,7 @@ class WebChannel:
         return self
 
     async def __aexit__(self, exception_type, exception_value, traceback):
-        await self._session.close()
+        await self._session.aclose()
 
     def __await__(self):
         yield self
@@ -178,30 +176,24 @@ class StreamStreamMulticallable(sonora.client.Multicallable):
 
 
 class Call(sonora.client.Call):
-    _response: typing.Optional[aiohttp.ClientResponse]
+    _response: typing.Optional[httpx.Response]
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, exception_type, exception_value, traceback):
+    async def __aexit__(self, exception_type, exception_value, traceback):
         if self._response:
-            self._response.close()
-
-    def __del__(self):
-        if self._response and not self._response.closed:
-            self._response.close()
+            await self._response.aclose()
 
     async def _do_event(self, event):
         if isinstance(event, _events.StartRequest):
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            timeout = httpx.Timeout(self._timeout)
             self._response = await self._session.request(
                 event.method,
                 self._url,
                 data=self._body,
                 headers=event.headers,
                 timeout=timeout,
-                compress=False,
-                chunked=self.request_streaming or self.response_streaming,
             )
         elif isinstance(event, _events.SendBody):
             pass
@@ -219,19 +211,18 @@ class Call(sonora.client.Call):
 
         for e in self._codec.start_response(
             _events.StartResponse(
-                status_code=self._response.status,
-                phrase=self._response.reason,
+                status_code=self._response.status_code,
+                phrase=self._response.reason_phrase,
                 headers=self._response.headers,
             )
         ):
             yield e
         if self.response_streaming:
-            async for chunk in self._response.content.iter_any():
-                print("chunk received", len(chunk))
+            async for chunk in self._response.aiter_bytes():
                 for e in self._codec.receive_body(chunk):
                     yield e
         else:
-            for e in self._codec.receive_body(await self._response.content.read()):
+            for e in self._codec.receive_body(await self._response.aread()):
                 yield e
 
         for e in self._codec.end_request():
@@ -241,7 +232,7 @@ class Call(sonora.client.Call):
 
     async def _get_response(self):
         if self._response is None:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
+            timeout = httpx.Timeout(self._timeout)
 
             self._response = await self._session.post(
                 self._url,
@@ -250,14 +241,11 @@ class Call(sonora.client.Call):
                 timeout=timeout,
             )
 
-            # XXX
-            # protocol.raise_for_status(self._response.headers)
-
         return self._response
 
     async def initial_metadata(self):
         # response = await self._get_response()
-        return Metadata(self._response.headers.items())
+        return self._response.headers.items()
 
     async def trailing_metadata(self):
         return self._trailers
@@ -266,17 +254,21 @@ class Call(sonora.client.Call):
 class UnaryResponseCall(Call):
     async def _get_response(self):
         message = None
-        async for e in self._do_call():
-            if isinstance(e, _events.ReceiveMessage):
-                if message is None:
-                    message = e.message
+        try:
+            async for e in self._do_call():
+                if isinstance(e, _events.ReceiveMessage):
+                    if message is None:
+                        message = e.message
+                    else:
+                        raise protocol.WebRpcError(
+                            grpc.StatusCode.UNIMPLEMENTED,
+                            "Received multiple responses for a unary call",
+                        )
                 else:
-                    raise protocol.WebRpcError(
-                        grpc.StatusCode.UNIMPLEMENTED,
-                        "Received multiple responses for a unary call",
-                    )
-            else:
-                await self._do_event(e)
+                    await self._do_event(e)
+        finally:
+            if self._response:
+                await self._response.aclose()
 
         if message is None:
             raise protocol.WebRpcError(
@@ -292,27 +284,19 @@ class UnaryUnaryCall(UnaryResponseCall):
     request_streaming = False
     response_streaming = False
 
-    @Call._raise_timeout(asyncio.TimeoutError)
+    @Call._raise_timeout(httpx.TimeoutException)
     def __await__(self):
         self._body = body_generator(self._codec.send_request(self._request))
 
-        try:
-            message = yield from self._get_response().__await__()
-            return message
-        finally:
-            if self._response:
-                self._response.release()
+        message = yield from self._get_response().__await__()
+        return message
 
 
 class UnaryStreamCall(Call):
     request_streaming = False
     response_streaming = True
 
-    def __init__(self, request, timeout, metadata, url, session, codec):
-        super().__init__(request, timeout, metadata, url, session, codec)
-        self._aiter = None
-
-    @Call._raise_timeout(asyncio.TimeoutError)
+    @Call._raise_timeout(httpx.TimeoutException)
     async def read(self):
         if self._aiter is None:
             self._aiter = self.__aiter__()
@@ -322,22 +306,26 @@ class UnaryStreamCall(Call):
         except StopAsyncIteration:
             return grpc.experimental.aio.EOF
 
-    @Call._raise_timeout(asyncio.TimeoutError)
+    @Call._raise_timeout(httpx.TimeoutException)
     async def __aiter__(self):
         self._body = body_generator(self._codec.send_request(self._request))
 
-        async for e in self._do_call():
-            if isinstance(e, _events.ReceiveMessage):
-                yield e.message
-            else:
-                await self._do_event(e)
+        try:
+            async for e in self._do_call():
+                if isinstance(e, _events.ReceiveMessage):
+                    yield e.message
+                else:
+                    await self._do_event(e)
+        finally:
+            if self._response:
+                await self._response.aclose()
 
 
 class StreamUnaryCall(UnaryResponseCall):
     request_streaming = True
     response_streaming = False
 
-    @Call._raise_timeout(asyncio.TimeoutError)
+    @Call._raise_timeout(httpx.TimeoutException)
     def __await__(self):
         self._body = body_generator(
             itertools.chain.from_iterable(
@@ -345,12 +333,8 @@ class StreamUnaryCall(UnaryResponseCall):
             )
         )
 
-        try:
-            message = yield from self._get_response().__await__()
-            return message
-        finally:
-            if self._response:
-                self._response.release()
+        message = yield from self._get_response().__await__()
+        return message
 
 
 class StreamStreamCall(Call):
@@ -361,7 +345,7 @@ class StreamStreamCall(Call):
         super().__init__(request, timeout, metadata, url, session, codec)
         self._aiter = None
 
-    @Call._raise_timeout(asyncio.TimeoutError)
+    @Call._raise_timeout(httpx.TimeoutException)
     async def read(self):
         if self._aiter is None:
             self._aiter = self.__aiter__()
@@ -371,7 +355,7 @@ class StreamStreamCall(Call):
         except StopAsyncIteration:
             return grpc.experimental.aio.EOF
 
-    @Call._raise_timeout(asyncio.TimeoutError)
+    @Call._raise_timeout(httpx.TimeoutException)
     async def __aiter__(self):
         self._body = body_generator(
             itertools.chain.from_iterable(
@@ -379,8 +363,12 @@ class StreamStreamCall(Call):
             )
         )
 
-        async for e in self._do_call():
-            if isinstance(e, _events.ReceiveMessage):
-                yield e.message
-            else:
-                await self._do_event(e)
+        try:
+            async for e in self._do_call():
+                if isinstance(e, _events.ReceiveMessage):
+                    yield e.message
+                else:
+                    await self._do_event(e)
+        finally:
+            if self._response:
+                await self._response.aclose()
