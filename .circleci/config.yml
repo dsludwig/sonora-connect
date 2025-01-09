@@ -126,7 +126,7 @@ jobs:
             curl -sSL $CONNECTCONFORMANCE_URL | tar xfz - -C $HOME/bin
           environment:
             CONNECTCONFORMANCE_URL: https://github.com/connectrpc/conformance/releases/download/v1.0.4/connectconformance-v1.0.4-Linux-x86_64.tar.gz
-      - run: poetry install --with=dev
+      - run: poetry install
       - run: poetry run tox -- -e conformance
   interop-grpcweb-wsgi:
     docker:
