@@ -336,7 +336,7 @@ async def handle_message_async(
     url = f"{proto}://{msg.host}:{msg.port}"
 
     if msg.request_delay_ms > 0:
-        time.sleep(msg.request_delay_ms / 1000.0)
+        asyncio.sleep(msg.request_delay_ms / 1000.0)
 
     if msg.protocol == config_pb2.PROTOCOL_GRPC:
         assert not http1
