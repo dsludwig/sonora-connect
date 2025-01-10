@@ -132,7 +132,6 @@ class grpcWSGI(grpc.Server):
             except protocol.InvalidEncoding:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
             except protocol.ProtocolError:
-                logging.exception("Protocol error handling RPC method")
                 context.set_code(grpc.StatusCode.INTERNAL)
             except Exception:
                 logging.exception("Exception handling RPC method")

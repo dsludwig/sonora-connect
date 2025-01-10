@@ -8,6 +8,7 @@ workflows:
       - test-py38
       - test-py39
       - test-py310
+      - test-conformance
       - lint
       - interop-grpcweb-wsgi:
           requires:
@@ -107,6 +108,26 @@ jobs:
           key: benchmarks-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ .Revision }}
           paths:
             - .benchmarks
+  test-conformance:
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - checkout
+      - run: sudo apt-get update
+      - run: sudo apt-get install python3-dev libev-dev
+      - run:
+          command: curl -sSL https://install.python-poetry.org | python -
+          environment:
+            POETRY_VERSION: 1.8.5
+            PYENV_VERSION: system
+      - run:
+          command: |
+            mkdir -p $HOME/bin
+            curl -sSL $CONNECTCONFORMANCE_URL | tar xfz - -C $HOME/bin
+          environment:
+            CONNECTCONFORMANCE_URL: https://github.com/connectrpc/conformance/releases/download/v1.0.4/connectconformance-v1.0.4-Linux-x86_64.tar.gz
+      - run: poetry install
+      - run: poetry run tox -- -e conformance
   interop-grpcweb-wsgi:
     docker:
       - image: public/sonora-grpcweb-interop
