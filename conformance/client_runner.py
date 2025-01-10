@@ -501,8 +501,11 @@ async def handle_message_async(
 
 def run_async():
     loop = asyncio.new_event_loop()
+    # # if we don't limit concurrency, we run out of file descriptors
+    # semaphore = asyncio.Semaphore(1024)
 
     async def run_message(req):
+        # async with semaphore:
         try:
             resp = await handle_message_async(req)
         except Exception as e:

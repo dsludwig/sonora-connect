@@ -707,13 +707,15 @@ class ConnectUnaryCodec(ConnectCodec):
         self._request = None
 
     def unwrap_message_stream(self, stream):
-        yield False, False, stream.read()
+        content_encoding = self._invocation_metadata.get('content-encoding', 'identity')
+        yield False, content_encoding != 'identity', stream.read()
 
     def wrap_message(self, _trailers, _compressed, message):
         return message
 
     def unwrap_message(self, body):
-        return False, False, bytes(body), bytearray()
+        content_encoding = self._invocation_metadata.get('content-encoding', 'identity')
+        return False, content_encoding != 'identity', bytes(body), bytearray()
 
     def send_response(self, response):
         self._response = response
@@ -859,13 +861,13 @@ _CODECS = [
     ("application/json", "content-encoding", JsonSerializer, ConnectUnaryJsonCodec),
     (
         "application/connect+proto",
-        "content-encoding",
+        "connect-content-encoding",
         ProtoSerializer,
         ConnectStreamProtoCodec,
     ),
     (
         "application/connect+json",
-        "content-encoding",
+        "connect-content-encoding",
         JsonSerializer,
         ConnectStreamJsonCodec,
     ),
@@ -892,4 +894,5 @@ def get_codec(
     if codec is None or codec.requires_trailers and not enable_trailers:
         raise protocol.InvalidContentType(f"Unsupported content-type: {content_type!r}")
 
+    codec.set_invocation_metadata(metadata)
     return codec
