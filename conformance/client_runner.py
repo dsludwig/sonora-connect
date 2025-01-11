@@ -145,6 +145,20 @@ def handle_message(
     else:
         proto = "http"
 
+    if msg.compression == config_pb2.COMPRESSION_IDENTITY:
+        compression = None
+    elif msg.compression == config_pb2.COMPRESSION_GZIP:
+        compression = grpc.Compression.Gzip
+    elif msg.compression == config_pb2.COMPRESSION_DEFLATE:
+        compression = grpc.Compression.Deflate
+    else:
+        return client_compat_pb2.ClientCompatResponse(
+            test_name=msg.test_name,
+            error=client_compat_pb2.ClientErrorResult(
+                message=f"Compression {msg.compression!r} not supported"
+            ),
+        )
+
     url = f"{proto}://{msg.host}:{msg.port}"
 
     if msg.request_delay_ms > 0:
@@ -159,14 +173,21 @@ def handle_message(
             credentials=grpc.ssl_channel_credentials(
                 root_certificates=msg.server_tls_cert
             ),
+            compression=compression,
         )
     elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
         channel = sonora.client.insecure_web_channel(
-            url, pool_manager_kws={"ssl_context": ssl_context}, json=json
+            url,
+            pool_manager_kws={"ssl_context": ssl_context},
+            json=json,
+            compression=compression,
         )
     elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
         channel = sonora.client.insecure_connect_channel(
-            url, pool_manager_kws={"ssl_context": ssl_context}, json=json
+            url,
+            pool_manager_kws={"ssl_context": ssl_context},
+            json=json,
+            compression=compression,
         )
     else:
         return client_compat_pb2.ClientCompatResponse(
@@ -297,7 +318,7 @@ def handle_message(
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
                 error=client_compat_pb2.ClientErrorResult(
-                    message="\n".join(traceback.format_exception(e))
+                    message="".join(traceback.format_exception(e))
                 ),
             )
 
@@ -333,6 +354,20 @@ async def handle_message_async(
     else:
         proto = "http"
 
+    if msg.compression == config_pb2.COMPRESSION_IDENTITY:
+        compression = None
+    elif msg.compression == config_pb2.COMPRESSION_GZIP:
+        compression = grpc.Compression.Gzip
+    elif msg.compression == config_pb2.COMPRESSION_DEFLATE:
+        compression = grpc.Compression.Deflate
+    else:
+        return client_compat_pb2.ClientCompatResponse(
+            test_name=msg.test_name,
+            error=client_compat_pb2.ClientErrorResult(
+                message=f"Compression {msg.compression!r} not supported"
+            ),
+        )
+
     url = f"{proto}://{msg.host}:{msg.port}"
 
     if msg.request_delay_ms > 0:
@@ -346,6 +381,7 @@ async def handle_message_async(
             credentials=grpc.ssl_channel_credentials(
                 root_certificates=msg.server_tls_cert
             ),
+            compression=compression,
         )
     elif msg.protocol == config_pb2.PROTOCOL_GRPC_WEB:
         # connector = aiohttp.TCPConnector(ssl=ssl_context)
@@ -353,6 +389,7 @@ async def handle_message_async(
             url,
             client_kws={"verify": ssl_context, "http1": http1, "http2": http2},
             json=json,
+            compression=compression,
         )
     elif msg.protocol == config_pb2.PROTOCOL_CONNECT:
         # connector = aiohttp.TCPConnector(ssl=ssl_context)
@@ -360,6 +397,7 @@ async def handle_message_async(
             url,
             client_kws={"verify": ssl_context, "http1": http1, "http2": http2},
             json=json,
+            compression=compression,
         )
     else:
         return client_compat_pb2.ClientCompatResponse(
@@ -494,7 +532,7 @@ async def handle_message_async(
             return client_compat_pb2.ClientCompatResponse(
                 test_name=msg.test_name,
                 error=client_compat_pb2.ClientErrorResult(
-                    message="\n".join(traceback.format_exception(e))
+                    message="".join(traceback.format_exception(e))
                 ),
             )
 
@@ -512,7 +550,7 @@ def run_async():
             resp = client_compat_pb2.ClientCompatResponse(
                 test_name=req.test_name,
                 error=client_compat_pb2.ClientErrorResult(
-                    message="\n".join(traceback.format_exception(e))
+                    message="".join(traceback.format_exception(e))
                 ),
             )
 
@@ -538,7 +576,7 @@ def run_sync():
             resp = client_compat_pb2.ClientCompatResponse(
                 test_name=req.test_name,
                 error=client_compat_pb2.ClientErrorResult(
-                    message="\n".join(traceback.format_exception(e))
+                    message="".join(traceback.format_exception(e))
                 ),
             )
 

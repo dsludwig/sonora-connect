@@ -41,7 +41,12 @@ class GZipEncoding(Encoding):
 
     def decode(self, compressed: bool, message: bytes) -> bytes:
         if compressed:
-            return gzip.decompress(message)
+            try:
+                return gzip.decompress(message)
+            except gzip.BadGzipFile as exc:
+                raise protocol.ProtocolError(
+                    "Cannot decode invalid compressed message"
+                ) from exc
         return message
 
     def encode(self, message: bytes) -> bytes:
@@ -55,7 +60,12 @@ class DeflateEncoding(Encoding):
 
     def decode(self, compressed: bool, message: bytes) -> bytes:
         if compressed:
-            return zlib.decompress(message)
+            try:
+                return zlib.decompress(message)
+            except zlib.error as exc:
+                raise protocol.ProtocolError(
+                    "Cannot decode invalid compressed message"
+                ) from exc
         return message
 
     def encode(self, message: bytes) -> bytes:
@@ -65,7 +75,7 @@ class DeflateEncoding(Encoding):
 class InvalidEncoding(Encoding):
     @property
     def encoding(self):
-        return "<invalid>"
+        return "identity"
 
     def decode(self, compressed, message):
         raise protocol.InvalidEncoding("cannot decode with unsupported encoder")

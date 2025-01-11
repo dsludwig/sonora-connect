@@ -13,16 +13,41 @@ from sonora import _codec, _encoding, _events, protocol
 from sonora.metadata import Metadata
 
 
-def insecure_web_channel(url, pool_manager_kws=None, json=False):
-    return WebChannel(url, pool_manager_kws=pool_manager_kws, json=json)
+def insecure_web_channel(
+    url,
+    pool_manager_kws=None,
+    json=False,
+    compression: typing.Optional[grpc.Compression] = None,
+):
+    return WebChannel(
+        url, pool_manager_kws=pool_manager_kws, json=json, compression=compression
+    )
 
 
-def insecure_connect_channel(url, pool_manager_kws=None, json=False):
-    return WebChannel(url, pool_manager_kws=pool_manager_kws, connect=True, json=json)
+def insecure_connect_channel(
+    url,
+    pool_manager_kws=None,
+    json=False,
+    compression: typing.Optional[grpc.Compression] = None,
+):
+    return WebChannel(
+        url,
+        pool_manager_kws=pool_manager_kws,
+        connect=True,
+        json=json,
+        compression=compression,
+    )
 
 
 class WebChannel:
-    def __init__(self, url, pool_manager_kws=None, connect=False, json=False):
+    def __init__(
+        self,
+        url,
+        pool_manager_kws=None,
+        connect=False,
+        json=False,
+        compression: typing.Optional[grpc.Compression] = None,
+    ):
         if not url.startswith("http") and "://" not in url:
             url = f"http://{url}"
 
@@ -32,6 +57,7 @@ class WebChannel:
         self._connect = connect
         self._json = json
         self._url = url
+        self._compression = compression
         self._session = urllib3.PoolManager(**pool_manager_kws)
 
     def __enter__(self):
@@ -49,6 +75,7 @@ class WebChannel:
             response_deserializer,
             self._connect,
             self._json,
+            self._compression,
         )
 
     def unary_stream(self, path, request_serializer, response_deserializer):
@@ -60,6 +87,7 @@ class WebChannel:
             response_deserializer,
             self._connect,
             self._json,
+            self._compression,
         )
 
     def stream_unary(self, path, request_serializer, response_deserializer):
@@ -71,6 +99,7 @@ class WebChannel:
             response_deserializer,
             self._connect,
             self._json,
+            self._compression,
         )
 
     def stream_stream(self, path, request_serializer, response_deserializer):
@@ -82,6 +111,7 @@ class WebChannel:
             response_deserializer,
             self._connect,
             self._json,
+            self._compression,
         )
 
 
@@ -95,6 +125,7 @@ class Multicallable:
         response_deserializer,
         connect,
         json,
+        compression,
     ):
         self._session = session
 
@@ -104,6 +135,7 @@ class Multicallable:
 
         self._connect = connect
         self._json = json
+        self._compression = compression
         self._metadata = Metadata(
             [
                 ("x-user-agent", "grpc-web-python/0.1"),
@@ -128,12 +160,23 @@ class Multicallable:
         serializer_class = (
             _codec.JsonSerializer if self._json else _codec.ProtoSerializer
         )
-        encoding = _encoding.IdentityEncoding()
+        if (
+            self._compression is None
+            or self._compression == grpc.Compression.NoCompression
+        ):
+            encoding = _encoding.IdentityEncoding()
+        elif self._compression == grpc.Compression.Deflate:
+            encoding = _encoding.DeflateEncoding()
+        elif self._compression == grpc.Compression.Gzip:
+            encoding = _encoding.GZipEncoding()
+        else:
+            raise ValueError(f"Unsupported compression: {self._compression!r}")
+
         serializer = serializer_class(
             request_serializer=self._serializer,
             response_deserializer=self._deserializer,
         )
-        return codec_class(encoding, serializer)
+        return codec_class(encoding, serializer, _codec.CodecRole.CLIENT)
 
     def future(self, request):
         raise NotImplementedError()
@@ -151,12 +194,22 @@ class UnaryUnaryMulticallable(Multicallable):
             serializer_class = (
                 _codec.JsonSerializer if self._json else _codec.ProtoSerializer
             )
-            encoding = _encoding.IdentityEncoding()
+            if (
+                self._compression is None
+                or self._compression == grpc.Compression.NoCompression
+            ):
+                encoding = _encoding.IdentityEncoding()
+            elif self._compression == grpc.Compression.Deflate:
+                encoding = _encoding.DeflateEncoding()
+            elif self._compression == grpc.Compression.Gzip:
+                encoding = _encoding.GZipEncoding()
+            else:
+                raise ValueError(f"Unsupported compression: {self._compression!r}")
             serializer = serializer_class(
                 request_serializer=self._serializer,
                 response_deserializer=self._deserializer,
             )
-            return codec_class(encoding, serializer)
+            return codec_class(encoding, serializer, _codec.CodecRole.CLIENT)
         else:
             return super()._codec
 
@@ -289,6 +342,7 @@ class Call:
                 headers=HTTPHeaderDict(event.headers),
                 timeout=self._timeout,
                 preload_content=not self.response_streaming,
+                decode_content=False,
                 chunked=self.request_streaming or self.response_streaming,
             )
         elif isinstance(event, _events.SendBody):
