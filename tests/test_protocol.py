@@ -32,7 +32,7 @@ class TestSerializer(_codec.Serializer):
 def test_wrapping(codec_class):
     encoding = _encoding.IdentityEncoding()
     serializer = TestSerializer()
-    codec = codec_class(encoding, serializer)
+    codec = codec_class(encoding, serializer, _codec.CodecRole.SERVER)
     data = b"foobar"
     wrapped = codec.wrap_message(False, False, data)
     assert codec.unwrap_message(wrapped) == (False, False, data, b"")
@@ -49,7 +49,7 @@ def test_wrapping(codec_class):
 def test_unwrapping_stream(codec_class):
     encoding = _encoding.IdentityEncoding()
     serializer = TestSerializer()
-    codec = codec_class(encoding, serializer)
+    codec = codec_class(encoding, serializer, _codec.CodecRole.SERVER)
     buffer = io.BytesIO()
 
     messages = [

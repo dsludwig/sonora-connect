@@ -11,6 +11,8 @@ features:
     - CODEC_JSON
   compressions:
     - COMPRESSION_IDENTITY
+    - COMPRESSION_GZIP
+    - COMPRESSION_DEFLATE
   stream_types:
     - STREAM_TYPE_UNARY
     - STREAM_TYPE_CLIENT_STREAM

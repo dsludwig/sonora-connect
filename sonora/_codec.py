@@ -1,6 +1,7 @@
 import abc
 import base64
 import itertools
+import enum
 import json
 import math
 import struct
@@ -123,8 +124,13 @@ class JsonSerializer(ProtoSerializer):
         )
 
 
+class CodecRole(enum.Enum):
+    CLIENT = enum.auto()
+    SERVER = enum.auto()
+
+
 class Codec:
-    def __init__(self, encoding: Encoding, serializer: Serializer):
+    def __init__(self, encoding: Encoding, serializer: Serializer, role: CodecRole):
         self.encoding = encoding
         self.serializer = serializer
         self._initial_metadata = Metadata()
@@ -134,6 +140,7 @@ class Codec:
         self._code = grpc.StatusCode.OK
         self._details: typing.Optional[str] = None
         self._buffer = bytearray()
+        self._role = role
 
     @property
     @abc.abstractmethod
@@ -242,8 +249,8 @@ class Codec:
 
 
 class GrpcCodec(Codec):
-    def __init__(self, encoding, serializer):
-        super().__init__(encoding, serializer)
+    def __init__(self, encoding, serializer, role):
+        super().__init__(encoding, serializer, role)
         self._started = False
         self._closed = False
 
@@ -265,7 +272,10 @@ class GrpcCodec(Codec):
             "POST",
             headers=protocol.encode_headers(
                 itertools.chain(
-                    (("content-type", self.content_type),),
+                    (
+                        ("content-type", self.content_type),
+                        ("grpc-encoding", self.encoding.encoding),
+                    ),
                     (
                         ()
                         if self._timeout is None
@@ -283,7 +293,10 @@ class GrpcCodec(Codec):
 
     def send_request(self, request):
         body = self.serializer.serialize_request(request)
-        body = self.wrap_message(False, False, body)
+        compressed = self.encoding.encoding != "identity"
+        if compressed:
+            body = self.encoding.encode(body)
+        body = self.wrap_message(False, compressed, body)
         yield SendBody(body)
 
     def start_response(self, response):
@@ -307,7 +320,7 @@ class GrpcCodec(Codec):
             message = "Unexpected content-type"
             self.set_code(code)
             self.set_details(message)
-        elif encoding != self.encoding.encoding:
+        elif encoding != "identity" and encoding != self.encoding.encoding:
             code = grpc.StatusCode.INTERNAL
             message = "Unexpected encoding"
             self.set_code(code)
@@ -365,12 +378,6 @@ class GrpcCodec(Codec):
             except ValueError:
                 return
 
-            if trailers:
-                trailing_metadata = Metadata(protocol.unpack_trailers(body))
-                self.set_trailing_metadata(trailing_metadata)
-                self._closed = True
-                return
-
             try:
                 body = self.encoding.decode(compressed, body)
             except protocol.ProtocolError:
@@ -380,6 +387,13 @@ class GrpcCodec(Codec):
                     initial_metadata=self._initial_metadata,
                     trailing_metadata=self._trailing_metadata,
                 )
+
+            if trailers:
+                trailing_metadata = Metadata(protocol.unpack_trailers(body))
+                self.set_trailing_metadata(trailing_metadata)
+                self._closed = True
+                return
+
             try:
                 message = self.serializer.deserialize_response(body)
             except Exception:
@@ -400,6 +414,12 @@ class GrpcCodec(Codec):
         )
         return tuple()
 
+    def _response_headers(self):
+        return (
+            ("content-type", self.content_type),
+            ("grpc-encoding", self.encoding.encoding),
+        )
+
     def _start(self):
         if self._closed:
             raise protocol.ProtocolError(
@@ -413,8 +433,8 @@ class GrpcCodec(Codec):
 
         headers = protocol.encode_headers(
             itertools.chain(
-                (("content-type", self.content_type),),
-                (self._initial_metadata),
+                self._response_headers(),
+                self._initial_metadata,
             )
         )
 
@@ -423,9 +443,12 @@ class GrpcCodec(Codec):
     def send_response(self, response):
         yield from self._start()
 
-        body = self.wrap_message(
-            False, False, self.serializer.serialize_response(response)
-        )
+        body = self.serializer.serialize_response(response)
+        compressed = self.encoding.encoding != "identity"
+        if compressed:
+            body = self.encoding.encode(body)
+
+        body = self.wrap_message(False, compressed, body)
 
         yield SendBody(body)
 
@@ -499,9 +522,6 @@ class GrpcWebProtoCodec(GrpcWebCodec):
 
 
 class GrpcWebTextCodec(GrpcWebProtoCodec):
-    def __init__(self, encoding, serializer):
-        super().__init__(encoding, serializer)
-
     @property
     def content_type(self):
         return "application/grpc-web-text"
@@ -541,9 +561,6 @@ class GrpcWebTextCodec(GrpcWebProtoCodec):
 
 
 class ConnectCodec(GrpcCodec):
-    def __init__(self, encoding, serializer):
-        super().__init__(encoding, serializer)
-
     @property
     def requires_trailers(self):
         return False
@@ -589,6 +606,7 @@ class ConnectCodec(GrpcCodec):
                 itertools.chain(
                     (
                         ("content-type", self.content_type),
+                        ("content-encoding", self.encoding.encoding),
                         ("accept-encoding", self.encoding.encoding),
                     ),
                     (
@@ -623,7 +641,7 @@ class ConnectCodec(GrpcCodec):
             message = "Unexpected content-type"
             self.set_code(code)
             self.set_details(message)
-        elif encoding != self.encoding.encoding:
+        elif encoding != "identity" and encoding != self.encoding.encoding:
             code = grpc.StatusCode.INTERNAL
             message = "Unexpected encoding"
             self.set_code(code)
@@ -646,6 +664,14 @@ class ConnectCodec(GrpcCodec):
     def receive_body(self, body):
         if self._code != grpc.StatusCode.OK:
             try:
+                content_encoding = self._initial_metadata.get(
+                    "content-encoding", "identity"
+                )
+                compressed = (
+                    content_encoding != "identity"
+                    and content_encoding == self.encoding.encoding
+                )
+                body = self.encoding.decode(compressed, body)
                 data = json.loads(body)
                 protocol.unpack_error_connect(
                     data, self._initial_metadata, self._trailing_metadata, self._code
@@ -668,13 +694,6 @@ class ConnectCodec(GrpcCodec):
             except ValueError:
                 return
 
-            if trailers:
-                trailing_metadata = protocol.unpack_trailers_connect(
-                    body, self._initial_metadata
-                )
-                self.set_trailing_metadata(trailing_metadata)
-                return tuple()
-
             try:
                 body = self.encoding.decode(compressed, body)
             except protocol.ProtocolError:
@@ -684,6 +703,14 @@ class ConnectCodec(GrpcCodec):
                     initial_metadata=self._initial_metadata,
                     trailing_metadata=self._trailing_metadata,
                 )
+
+            if trailers:
+                trailing_metadata = protocol.unpack_trailers_connect(
+                    body, self._initial_metadata
+                )
+                self.set_trailing_metadata(trailing_metadata)
+                return tuple()
+
             try:
                 message = self.serializer.deserialize_response(body)
             except Exception:
@@ -701,19 +728,36 @@ class ConnectCodec(GrpcCodec):
 
 
 class ConnectUnaryCodec(ConnectCodec):
-    def __init__(self, encoding, serializer):
-        super().__init__(encoding, serializer)
+    def __init__(self, encoding, serializer, role):
+        super().__init__(encoding, serializer, role)
         self._response = None
         self._request = None
 
     def unwrap_message_stream(self, stream):
-        yield False, False, stream.read()
+        if self._role == CodecRole.CLIENT:
+            metadata = self._initial_metadata
+        else:
+            metadata = self._invocation_metadata
+
+        content_encoding = metadata.get("content-encoding", "identity")
+        compressed = content_encoding != "identity"
+        yield False, compressed, stream.read()
 
     def wrap_message(self, _trailers, _compressed, message):
         return message
 
     def unwrap_message(self, body):
-        return False, False, bytes(body), bytearray()
+        if self._role == CodecRole.CLIENT:
+            metadata = self._initial_metadata
+        else:
+            metadata = self._invocation_metadata
+
+        content_encoding = metadata.get("content-encoding", "identity")
+        compressed = content_encoding != "identity"
+        return False, compressed, bytes(body), bytearray()
+
+    def _response_headers(self):
+        return (("content-type", self.content_type),)
 
     def send_response(self, response):
         self._response = response
@@ -757,14 +801,17 @@ class ConnectUnaryCodec(ConnectCodec):
         if self._response is None:
             body = b""
         else:
-            body = self.wrap_message(
-                False, False, self.serializer.serialize_response(self._response)
-            )
+            body = self.serializer.serialize_response(self._response)
+        compressed = self.encoding.encoding != "identity"
+        if compressed:
+            body = self.encoding.encode(body)
+        body = self.wrap_message(False, compressed, body)
 
         headers = protocol.encode_headers(
             itertools.chain(
                 (
                     ("content-type", self.content_type),
+                    ("content-encoding", self.encoding.encoding),
                     ("content-length", str(len(body))),
                 ),
                 (self._initial_metadata),
@@ -813,9 +860,35 @@ class ConnectUnaryProtoCodec(ConnectUnaryCodec):
 
 
 class ConnectStreamCodec(ConnectCodec):
-    def __init__(self, encoding, serializer):
-        super().__init__(encoding, serializer)
+    def __init__(self, encoding, serializer, role):
+        super().__init__(encoding, serializer, role)
         self._started = False
+
+    def _response_headers(self):
+        return (
+            ("content-type", self.content_type),
+            ("connect-content-encoding", self.encoding.encoding),
+        )
+
+    def start_request(self):
+        yield StartRequest(
+            "POST",
+            headers=protocol.encode_headers(
+                itertools.chain(
+                    (
+                        ("content-type", self.content_type),
+                        ("connect-content-encoding", self.encoding.encoding),
+                        ("connect-accept-encoding", self.encoding.encoding),
+                    ),
+                    (
+                        ()
+                        if self._timeout is None
+                        else (("connect-timeout-ms", str(int(self._timeout * 1000))),)
+                    ),
+                    self._invocation_metadata,
+                )
+            ),
+        )
 
     def end_response(self):
         yield from self._start()
@@ -830,7 +903,10 @@ class ConnectStreamCodec(ConnectCodec):
             end_of_stream["error"] = error
 
         body = json.dumps(end_of_stream).encode()
-        body = self.wrap_message(True, False, body)
+        compressed = self.encoding.encoding != "identity"
+        if compressed:
+            body = self.encoding.encode(body)
+        body = self.wrap_message(True, compressed, body)
 
         yield SendBody(body, more_body=False)
 
@@ -859,13 +935,13 @@ _CODECS = [
     ("application/json", "content-encoding", JsonSerializer, ConnectUnaryJsonCodec),
     (
         "application/connect+proto",
-        "content-encoding",
+        "connect-content-encoding",
         ProtoSerializer,
         ConnectStreamProtoCodec,
     ),
     (
         "application/connect+json",
-        "content-encoding",
+        "connect-content-encoding",
         JsonSerializer,
         ConnectStreamJsonCodec,
     ),
@@ -887,9 +963,10 @@ def get_codec(
                 request_deserializer=rpc_method_handler.request_deserializer,
                 response_serializer=rpc_method_handler.response_serializer,
             )
-            codec = codec_class(encoding, serializer)
+            codec = codec_class(encoding, serializer, CodecRole.SERVER)
 
     if codec is None or codec.requires_trailers and not enable_trailers:
         raise protocol.InvalidContentType(f"Unsupported content-type: {content_type!r}")
 
+    codec.set_invocation_metadata(metadata)
     return codec
