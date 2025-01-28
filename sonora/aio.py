@@ -262,7 +262,6 @@ class Call(sonora.client.Call):
             yield e
         if self.response_streaming:
             async for chunk in self._response.content.iter_any():
-                print("chunk received", len(chunk))
                 for e in self._codec.receive_body(chunk):
                     yield e
         else:
